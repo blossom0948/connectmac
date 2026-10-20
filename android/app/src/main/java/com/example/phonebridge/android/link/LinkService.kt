@@ -65,14 +65,12 @@ object ConnectionState {
     val transfers = MutableStateFlow<List<TransferProgress>>(emptyList())
     val diagnostics = MutableStateFlow<List<PhoneBridgeDiagnostic>>(emptyList())
 
+    @Synchronized
     fun updateTransfer(transfer: TransferProgress) {
         val current = transfers.value.filterNot { it.id == transfer.id }
         transfers.value = (listOf(transfer) + current).take(30)
     }
 
-    fun removeTransfer(id: String) {
-        transfers.value = transfers.value.filterNot { it.id == id }
-    }
 }
 
 data class ReceivedFileItem(val name: String, val path: String, val contentType: String, val size: Long)
@@ -348,10 +346,10 @@ class LinkService : Service() {
                 transferMonitor.notifyAll()
             }
             if (service != null) sendEvent(service, JSONObject().put("kind", "file_cancel").put("eventId", id))
-            service?.cancelIncomingFileTransfer(id, notifyPeer = false)
             ConnectionState.transfers.value.firstOrNull { it.id == id }?.let { current ->
                 ConnectionState.updateTransfer(current.copy(status = "취소됨", detail = "전송을 취소했습니다."))
             }
+            service?.let { instance -> executor.execute { instance.cancelIncomingFileTransfer(id, notifyPeer = false) } }
             PhoneBridgeDiagnostics.record("전송", "파일 전송을 사용자가 취소했습니다.")
         }
 
@@ -1098,7 +1096,9 @@ class LinkService : Service() {
                 transfer.manifestFile.delete()
             }
         }
-        ConnectionState.removeTransfer(id)
+        ConnectionState.transfers.value.firstOrNull { it.id == id }?.let { transfer ->
+            ConnectionState.updateTransfer(transfer.copy(status = "취소됨", detail = "전송을 취소했습니다."))
+        }
         if (notifyPeer) sendEvent(this, JSONObject().put("kind", "file_cancelled").put("eventId", id).put("success", true))
         PhoneBridgeDiagnostics.record("전송", "받는 파일 전송이 취소되었습니다.")
     }
