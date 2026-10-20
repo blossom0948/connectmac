@@ -1,7 +1,7 @@
 {
-  "versionName": "0.3.3",
-  "versionCode": 3003,
-  "apkUrl": "https://github.com/blossom0948/connectmac/releases/download/v0.3.3/PhoneBridge-android.apk",
-  "sha256": "4079f18f5fa7336fcd2a6c7a1cb3b3ccadf21dd93b7691885843e6d10c1744ca",
-  "notes": "버튼을 눌러도 페어링이 지워지지 않도록 정리하고 연결 복구를 강화했습니다. Android 화면을 연결·전송·설정 탭으로 새롭게 구성했습니다."
+  "versionName": "0.3.4",
+  "versionCode": 3004,
+  "apkUrl": "https://github.com/blossom0948/connectmac/releases/download/v0.3.4/PhoneBridge-android.apk",
+  "sha256": "229da8cc13a771de8cc665f557e3f9515886f2b2831cea11e3b1827270a13dd9",
+  "notes": "Mac과 Android의 탭을 이동할 때 암호화된 연결 확인 신호를 보내고, 응답이 없으면 로컬 Wi-Fi 검색으로 다시 연결합니다. 앱 화면 복귀 시에도 연결 서비스를 확인합니다."
 }

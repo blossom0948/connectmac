@@ -183,6 +183,12 @@ final class PhoneBridgeModel: ObservableObject {
         status = "Android 앱에서 QR 코드를 스캔하세요"
     }
 
+    func selectSection(_ section: String) {
+        guard selectedSection != section else { return }
+        selectedSection = section
+        server.checkConnection()
+    }
+
     func requestMacNotifications() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -649,6 +655,8 @@ private final class MacLinkServer: @unchecked Sendable {
     private var paired = PairKeyStore.load()
     private var activeConnection: NWConnection?
     private var activeSessionKey: SymmetricKey?
+    private var inboundMessageSequence: UInt64 = 0
+    private var activePeerSupportsProbes = false
     private var listenerRestartTask: DispatchWorkItem?
     private var listenerRestartDelay: TimeInterval = 1
     var onStatus: ((String, Bool) -> Void)?
@@ -674,6 +682,7 @@ private final class MacLinkServer: @unchecked Sendable {
             self.activeConnection?.cancel()
             self.activeConnection = nil
             self.activeSessionKey = nil
+            self.activePeerSupportsProbes = false
         }
     }
 
@@ -690,6 +699,21 @@ private final class MacLinkServer: @unchecked Sendable {
                 "nonce": nonceData.base64EncodedString(),
                 "ciphertext": combined.base64EncodedString()
             ], over: connection)
+        }
+    }
+
+    func checkConnection() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard self.activePeerSupportsProbes, let connection = self.activeConnection else { return }
+            let sequenceAtPing = self.inboundMessageSequence
+            self.sendSecure(["kind": "heartbeat_ping", "timestamp": Date().timeIntervalSince1970])
+            self.queue.asyncAfter(deadline: .now() + .seconds(8)) { [weak self, weak connection] in
+                guard let self, let connection,
+                      self.activeConnection === connection,
+                      self.inboundMessageSequence == sequenceAtPing else { return }
+                self.connectionEnded(connection, status: "휴대폰 응답이 없어 다시 연결을 기다리는 중")
+            }
         }
     }
 
@@ -776,6 +800,7 @@ private final class MacLinkServer: @unchecked Sendable {
             self.activeConnection = connection
             let sessionKey = Self.sessionKey(secret: key, challenge: challenge)
             self.activeSessionKey = sessionKey
+            self.activePeerSupportsProbes = (object["capabilities"] as? [String])?.contains("peer-probe-v1") == true
             self.onStatus?("\(name) 연결됨", true)
             self.readSecureEvents(from: connection, buffer: remainder, key: sessionKey, deviceName: name)
         }
@@ -798,9 +823,10 @@ private final class MacLinkServer: @unchecked Sendable {
                 let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: combined.dropLast(16), tag: combined.suffix(16))
                 let clear = try AES.GCM.open(box, using: key)
                 let event = try JSONDecoder().decode(PhoneEvent.self, from: clear)
+                self.inboundMessageSequence &+= 1
                 if event.kind == "heartbeat_ping" {
                     self.sendSecure(["kind": "heartbeat_pong", "timestamp": Date().timeIntervalSince1970])
-                } else {
+                } else if event.kind != "heartbeat_pong" {
                     DispatchQueue.main.async { self.onEvent?(event) }
                 }
                 self.readSecureEvents(from: connection, buffer: remainder, key: key, deviceName: deviceName)
@@ -815,6 +841,7 @@ private final class MacLinkServer: @unchecked Sendable {
         guard activeConnection === connection else { return }
         activeConnection = nil
         activeSessionKey = nil
+        activePeerSupportsProbes = false
         onStatus?(status, false)
     }
 

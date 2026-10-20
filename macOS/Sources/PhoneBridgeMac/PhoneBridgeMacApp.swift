@@ -51,7 +51,7 @@ private struct MenuBarCommands: View {
         Divider()
         Button("PhoneBridge 열기") { openWindow(id: "main") }
         Button("알림 보기") {
-            model.selectedSection = "알림"
+            model.selectSection("알림")
             openWindow(id: "main")
         }
         Button("휴대폰 찾기") { model.findPhone() }

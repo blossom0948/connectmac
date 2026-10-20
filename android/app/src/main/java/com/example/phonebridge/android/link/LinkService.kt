@@ -67,6 +67,7 @@ data class ReceivedFileItem(val name: String, val path: String, val contentType:
 class LinkService : Service() {
     companion object {
         const val ACTION_START = "com.example.phonebridge.action.START"
+        const val ACTION_CHECK_CONNECTION = "com.example.phonebridge.action.CHECK_CONNECTION"
         const val ACTION_STOP = "com.example.phonebridge.action.STOP"
         const val ACTION_START_SCREEN_MIRROR = "com.example.phonebridge.action.START_SCREEN_MIRROR"
         const val ACTION_STOP_SCREEN_MIRROR = "com.example.phonebridge.action.STOP_SCREEN_MIRROR"
@@ -78,13 +79,20 @@ class LinkService : Service() {
         private const val SERVICE_TYPE = "_phonebridge._tcp."
         private const val HEARTBEAT_INTERVAL_MS = 20_000L
         private const val HEARTBEAT_TIMEOUT_MS = 90_000L
+        private const val CONNECTION_PROBE_TIMEOUT_MS = 8_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
         private val heartbeatScheduler = Executors.newSingleThreadScheduledExecutor()
         private val connectionLock = Any()
-        private data class ActiveSession(val socket: Socket, val writer: BufferedWriter, val key: ByteArray)
+        private data class ActiveSession(
+            val socket: Socket,
+            val writer: BufferedWriter,
+            val key: ByteArray,
+            val heartbeatSupported: Boolean,
+        )
         @Volatile private var activeSession: ActiveSession? = null
         @Volatile private var connecting = false
         @Volatile private var lastServerActivityAt = 0L
+        @Volatile private var serverMessageSequence = 0L
 
         fun sendEvent(context: Context, event: JSONObject) {
             val session = activeSession ?: return
@@ -178,6 +186,10 @@ class LinkService : Service() {
         }
         if (intent?.action == ACTION_STOP_SCREEN_MIRROR) {
             stopScreenMirror(notifyMac = true)
+            return START_STICKY
+        }
+        if (intent?.action == ACTION_CHECK_CONNECTION && isConnected()) {
+            checkConnectionHealth()
             return START_STICKY
         }
         val startProjection = intent?.action == ACTION_START_SCREEN_MIRROR
@@ -353,7 +365,8 @@ class LinkService : Service() {
             val deviceName = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android phone"
             val proof = LinkCrypto.hmac(secret, "auth|${LinkCrypto.b64(nonce)}|$deviceName")
             synchronized(writer) {
-                writer.write(JSONObject().put("type", "auth").put("name", deviceName).put("proof", LinkCrypto.b64(proof)).toString())
+                writer.write(JSONObject().put("type", "auth").put("name", deviceName).put("proof", LinkCrypto.b64(proof))
+                    .put("capabilities", org.json.JSONArray().put("peer-probe-v1")).toString())
                 writer.newLine()
                 writer.flush()
             }
@@ -369,7 +382,7 @@ class LinkService : Service() {
             val sessionKey = LinkCrypto.deriveSessionKey(secret, nonce)
             synchronized(connectionLock) {
                 activeSession?.takeIf { it.socket !== socket }?.let { runCatching { it.socket.close() } }
-                activeSession = ActiveSession(socket, writer, sessionKey)
+                activeSession = ActiveSession(socket, writer, sessionKey, heartbeatSupported)
                 lastServerActivityAt = SystemClock.elapsedRealtime()
                 connecting = false
             }
@@ -413,6 +426,7 @@ class LinkService : Service() {
                 // Any authenticated Mac command proves the channel is alive. Counting only pongs
                 // incorrectly dropped the session during larger interactive operations.
                 lastServerActivityAt = SystemClock.elapsedRealtime()
+                serverMessageSequence++
                 if (command.optString("kind") == "heartbeat_pong") {
                     lastServerActivityAt = SystemClock.elapsedRealtime()
                 } else {
@@ -440,6 +454,7 @@ class LinkService : Service() {
 
     private fun handleCommand(command: JSONObject) {
         when (command.optString("kind")) {
+            "heartbeat_ping" -> sendEvent(this, JSONObject().put("kind", "heartbeat_pong").put("timestamp", System.currentTimeMillis() / 1000.0))
             "notification_reply" -> {
                 val eventId = command.optString("eventId")
                 val success = PhoneNotificationListener.sendReply(eventId, command.optString("text"))
@@ -723,6 +738,19 @@ class LinkService : Service() {
                 if (!isConnected()) startDiscovery(pairing.secret)
             }, delay)
         }
+    }
+
+    /** A navigation tap probes the existing socket; an unresponsive peer is dropped and rediscovered. */
+    private fun checkConnectionHealth() {
+        val session = activeSession ?: return
+        if (!session.heartbeatSupported) return
+        val sequenceAtPing = serverMessageSequence
+        sendEvent(this, JSONObject().put("kind", "heartbeat_ping").put("timestamp", System.currentTimeMillis() / 1000.0))
+        retryHandler.postDelayed({
+            if (activeSession === session && serverMessageSequence == sequenceAtPing) {
+                handleConnectionLoss(session.socket, "Mac 응답이 없어 다시 연결하는 중…")
+            }
+        }, CONNECTION_PROBE_TIMEOUT_MS)
     }
 
     private fun stopDiscovery() {

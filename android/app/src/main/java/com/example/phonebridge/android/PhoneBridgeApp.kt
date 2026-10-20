@@ -97,6 +97,7 @@ fun PhoneBridgeApp(
     phonePermissionGranted: Boolean,
     onScan: () -> Unit,
     onReconnect: () -> Unit,
+    onEnsureConnection: () -> Unit,
     onPickPhotos: () -> Unit,
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
@@ -113,6 +114,10 @@ fun PhoneBridgeApp(
     var selectedTab by rememberSaveable { mutableStateOf(PhoneBridgeTab.Connection) }
     var showUnpairConfirmation by remember { mutableStateOf(false) }
     val connected = linkStatus.startsWith("Mac에 연결됨")
+    fun selectTab(tab: PhoneBridgeTab) {
+        if (selectedTab != tab) onEnsureConnection()
+        selectedTab = tab
+    }
 
     Column(Modifier.fillMaxSize().padding(systemBarPadding)) {
         Row(
@@ -152,8 +157,8 @@ fun PhoneBridgeApp(
                     onReconnect = onReconnect,
                     onStartScreenShare = onStartScreenShare,
                     onStopScreenShare = onStopScreenShare,
-                    onGoToTransfer = { selectedTab = PhoneBridgeTab.Transfer },
-                    onGoToSettings = { selectedTab = PhoneBridgeTab.Settings },
+                    onGoToTransfer = { selectTab(PhoneBridgeTab.Transfer) },
+                    onGoToSettings = { selectTab(PhoneBridgeTab.Settings) },
                 )
                 PhoneBridgeTab.Transfer -> TransferTab(
                     connected = connected,
@@ -189,7 +194,7 @@ fun PhoneBridgeApp(
                 PhoneBridgeTab.entries.forEach { tab ->
                     NavigationBarItem(
                         selected = selectedTab == tab,
-                        onClick = { selectedTab = tab },
+                        onClick = { selectTab(tab) },
                         icon = { Icon(tab.icon, contentDescription = null, modifier = Modifier.size(21.dp)) },
                         label = { Text(tab.title, fontSize = 13.sp, fontWeight = if (selectedTab == tab) FontWeight.SemiBold else FontWeight.Normal) },
                         alwaysShowLabel = true,

@@ -145,7 +145,7 @@ private struct SidebarNavigationRow: View {
     var body: some View {
         let selected = model.selectedSection == title
         Button {
-            model.selectedSection = title
+            model.selectSection(title)
         } label: {
             HStack(spacing: 11) {
                 Image(systemName: icon)
@@ -215,7 +215,7 @@ private struct AppControlBar: View {
             .disabled(!model.isConnected)
             .help("연결된 Android 휴대폰에서 알림음을 재생합니다")
             Button {
-                model.selectedSection = "설정"
+                model.selectSection("설정")
             } label: {
                 Image(systemName: "gearshape")
                     .frame(width: 24, height: 24)
@@ -288,7 +288,7 @@ private struct OverviewControlRail: View {
                     .disabled(!model.isConnected)
 
                     Button {
-                        model.selectedSection = "폰 화면"
+                        model.selectSection("폰 화면")
                     } label: {
                         Label("폰 화면", systemImage: "macbook.and.iphone")
                     }
@@ -309,7 +309,7 @@ private struct OverviewControlRail: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!model.isConnected)
                 Button {
-                    model.selectedSection = "폰 화면"
+                    model.selectSection("폰 화면")
                 } label: {
                     Label("폰 화면", systemImage: "macbook.and.iphone")
                 }
@@ -424,7 +424,7 @@ private struct RecentActivityCard: View {
             HStack {
                 Text("최근 활동").font(.headline)
                 Spacer()
-                Button("모두 보기") { model.selectedSection = "알림" }.buttonStyle(.link).phoneBridgeHover()
+                Button("모두 보기") { model.selectSection("알림") }.buttonStyle(.link).phoneBridgeHover()
             }
             if model.events.isEmpty {
                 EmptyStateView(title: "새 활동이 없습니다", icon: "bell", detail: "페어링한 휴대폰의 알림이 여기에 표시됩니다.")
@@ -458,12 +458,12 @@ private struct QuickActionsCard: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("빠른 실행").font(.headline)
             LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                QuickAction(title: "알림", detail: "휴대폰 알림 확인", icon: "bell", action: { model.selectedSection = "알림" })
-                QuickAction(title: "메시지", detail: "SMS와 대화", icon: "message", action: { model.selectedSection = "메시지" })
-                QuickAction(title: "통화", detail: "전화 상태 확인", icon: "phone", action: { model.selectedSection = "통화" })
-                QuickAction(title: "사진", detail: "휴대폰으로 보내기", icon: "photo", action: { model.selectedSection = "사진" })
-                QuickAction(title: "미디어", detail: "재생 제어", icon: "playpause", action: { model.selectedSection = "미디어" })
-                QuickAction(title: "클립보드", detail: "텍스트 복사", icon: "doc.on.clipboard", action: { model.selectedSection = "클립보드" })
+                QuickAction(title: "알림", detail: "휴대폰 알림 확인", icon: "bell", action: { model.selectSection("알림") })
+                QuickAction(title: "메시지", detail: "SMS와 대화", icon: "message", action: { model.selectSection("메시지") })
+                QuickAction(title: "통화", detail: "전화 상태 확인", icon: "phone", action: { model.selectSection("통화") })
+                QuickAction(title: "사진", detail: "휴대폰으로 보내기", icon: "photo", action: { model.selectSection("사진") })
+                QuickAction(title: "미디어", detail: "재생 제어", icon: "playpause", action: { model.selectSection("미디어") })
+                QuickAction(title: "클립보드", detail: "텍스트 복사", icon: "doc.on.clipboard", action: { model.selectSection("클립보드") })
             }
         }
         .padding(18)

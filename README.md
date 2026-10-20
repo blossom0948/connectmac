@@ -91,10 +91,10 @@ cd android
 Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.gradle.kts`에서 같은 값으로 올리고 Android `versionCode`도 증가시킨 뒤 다음 명령을 실행합니다.
 
 ```sh
-scripts/package-release.sh 0.3.3
+scripts/package-release.sh 0.3.4
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.3/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.3` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.4/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.4` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 

@@ -75,6 +75,7 @@ import com.example.phonebridge.android.update.PhoneBridgeUpdateScheduler
 import com.example.phonebridge.android.update.PhoneBridgeUpdateWorker
 
 class MainActivity : ComponentActivity() {
+    private var hasResumedOnce = false
     private var pairedName by mutableStateOf<String?>(null)
     private var systemBarPadding by mutableStateOf(PaddingValues(0.dp))
     private var galleryAccessGranted by mutableStateOf(false)
@@ -182,6 +183,7 @@ class MainActivity : ComponentActivity() {
                         phonePermissionGranted = hasPhonePermission(),
                         onScan = ::launchScanner,
                         onReconnect = ::startLink,
+                        onEnsureConnection = ::ensureLink,
                         onPickPhotos = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                         onPickFile = { filePicker.launch(arrayOf("*/*")) },
                         onSendClipboard = ::sendClipboardToMac,
@@ -215,6 +217,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (hasResumedOnce) ensureLink() else hasResumedOnce = true
         updateManager.onResume()
         getSharedPreferences(PhoneBridgeUpdatePreferences.PREFERENCES, MODE_PRIVATE)
             .edit()
@@ -263,6 +266,13 @@ class MainActivity : ComponentActivity() {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         val intent = Intent(this, LinkService::class.java).setAction(LinkService.ACTION_START)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+    }
+
+    /** Keep tab navigation independent from the socket service and restart it if Android reclaimed it. */
+    private fun ensureLink() {
+        if (PairingStore.load(this) == null) return
+        val intent = Intent(this, LinkService::class.java).setAction(LinkService.ACTION_CHECK_CONNECTION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
     }
 
