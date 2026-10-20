@@ -48,6 +48,7 @@ import android.media.AudioManager
 import android.media.ToneGenerator
 import android.util.Base64
 import com.example.phonebridge.android.notifications.PhoneNotificationListener
+import com.example.phonebridge.android.remote.PhoneRemoteControlService
 import java.io.ByteArrayOutputStream
 import java.io.File
 
@@ -91,10 +92,18 @@ class LinkService : Service() {
 
         fun isConnected(): Boolean = activeSocket?.isConnected == true && activeSocket?.isClosed == false && activeKey != null
 
-        fun sendFile(context: Context, name: String, contentType: String, bytes: ByteArray): Boolean {
+        fun sendRemoteControlStatus(context: Context) {
+            val enabled = PhoneRemoteControlService.isRunning()
+            sendEvent(context, JSONObject()
+                .put("kind", "remote_control_status")
+                .put("success", enabled)
+                .put("text", if (enabled) "원격 터치를 사용할 수 있습니다." else "Android 설정에서 PhoneBridge 원격 터치 서비스를 켜세요."))
+        }
+
+        fun sendFile(context: Context, name: String, contentType: String, bytes: ByteArray, transferId: String? = null): Boolean {
             if (bytes.size > 100 * 1024 * 1024 || !isConnected()) return false
             executor.execute {
-                val transferId = java.util.UUID.randomUUID().toString()
+                val currentTransferId = transferId ?: java.util.UUID.randomUUID().toString()
                 val chunkSize = 24 * 1024
                 val count = maxOf(1, (bytes.size + chunkSize - 1) / chunkSize)
                 for (index in 0 until count) {
@@ -102,7 +111,7 @@ class LinkService : Service() {
                     val end = minOf(start + chunkSize, bytes.size)
                     sendEvent(context, JSONObject()
                         .put("kind", "file_chunk")
-                        .put("eventId", transferId)
+                        .put("eventId", currentTransferId)
                         .put("title", name)
                         .put("source", contentType)
                         .put("transferIndex", index)
@@ -334,6 +343,7 @@ class LinkService : Service() {
             retryScheduled = false
             ConnectionState.status.value = "Mac에 연결됨"
             sendBatterySnapshot()
+            sendRemoteControlStatus(this)
             executor.execute { readServer(socket, reader, sessionKey) }
         }.onFailure {
             ConnectionState.status.value = "Mac을 찾지 못했습니다 · 로컬 Wi‑Fi에서 검색 중"
@@ -402,6 +412,35 @@ class LinkService : Service() {
                 }
             }
             "stop_screen_mirror" -> stopScreenMirror(notifyMac = true)
+            "remote_control" -> {
+                val action = command.optString("action")
+                val projectionActive = mediaProjection != null
+                val serviceEnabled = PhoneRemoteControlService.isRunning()
+                val result = if (projectionActive && serviceEnabled) {
+                    PhoneRemoteControlService.dispatch(
+                        action = action,
+                        x = command.optDouble("x", 0.0).toFloat(),
+                        y = command.optDouble("y", 0.0).toFloat(),
+                        endX = command.optDouble("endX", 0.0).toFloat(),
+                        endY = command.optDouble("endY", 0.0).toFloat(),
+                    )
+                } else false
+                sendEvent(this, JSONObject()
+                    .put("kind", "remote_control_result")
+                    .put("success", result)
+                    .put("text", when {
+                        !projectionActive -> "Android에서 화면 공유를 먼저 시작하세요."
+                        !serviceEnabled -> "Android 설정에서 PhoneBridge 원격 터치 서비스를 켜세요."
+                        result -> "화면 조작을 휴대폰으로 보냈습니다."
+                        else -> "화면 조작을 실행하지 못했습니다. 잠금 화면이나 보호된 앱인지 확인하세요."
+                    }))
+            }
+            "gallery_list" -> executor.execute {
+                PhoneGalleryBridge.sendPage(this, command.optInt("offset", 0), command.optInt("limit", 40))
+            }
+            "gallery_fetch" -> executor.execute {
+                PhoneGalleryBridge.sendItem(this, command.optString("assetId"), command.optString("transferId"))
+            }
             "clipboard_set" -> {
                 val text = command.optString("text")
                 if (text.isEmpty() || text.toByteArray(Charsets.UTF_8).size > 20 * 1024) {

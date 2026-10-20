@@ -6,6 +6,23 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>PhoneBridge</title>
         <item>
+            <title>0.3.0</title>
+            <pubDate>Tue, 20 Oct 2026 14:49:40 +0900</pubDate>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.3.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[PhoneBridge 0.3.0
+
+- Mac에서 QR 코드 만료 후 새 페어링 코드를 바로 만들 수 있습니다.
+- Android 사진 갤러리 탐색과 선택한 원본 다운로드를 추가했습니다.
+- 화면 공유 중 Mac에서 Android를 탭·스와이프하고 시스템 이동을 제어할 수 있습니다.
+- Mac 끌어놓기와 Android 공유 메뉴 파일 전송을 추가했습니다.
+- 앱 간 업데이트와 연결 상태·권한 안내를 다듬었습니다.
+]]></description>
+            <enclosure url="https://github.com/blossom0948/connectmac/releases/download/v0.3.0/PhoneBridge-macOS.dmg" length="3549102" type="application/octet-stream" sparkle:edSignature="rnjAs4EIdrcwTZM19GHndBhcN/Lw8sJILGdNt+XNYybgGxjlpOV3GUQXpCrKVWkbISoBaAmPQ5yzOEz8qW6bBQ=="/>
+        </item>
+        <item>
             <title>0.2.0</title>
             <pubDate>Tue, 20 Oct 2026 14:26:46 +0900</pubDate>
             <sparkle:version>2</sparkle:version>
@@ -22,6 +39,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: 4HizS0N4+yHJXKKOPgOgo3NaAJElVW3NB9vVay6oLugLVUBb6QelMGhegw46EdRhyQUPSeKfkOoqygzCdMspBQ==
-length: 1355
+edSignature: iHnphusiYNddZIlDdecTqBo8B4R3tBZcTcxJ+/y2y7eS6LE2q7qoCiu6NdIIY1ONdv71EG7oZOKf5Lzf49IODQ==
+length: 2591
 -->

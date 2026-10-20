@@ -23,12 +23,15 @@ struct PhoneEvent: Identifiable, Codable {
     let payload: String?
     let actions: [PhoneEventAction]?
     let success: Bool?
+    let size: Int64?
+    let pageOffset: Int?
+    let hasMore: Bool?
 
     var id: String { eventId ?? "\(kind)-\(timestamp ?? 0)-\(title ?? "")" }
 
     enum CodingKeys: String, CodingKey {
         case eventId, kind, title, text, source, battery, callState, timestamp
-        case canReply, transferIndex, transferCount, payload, actions, success
+        case canReply, transferIndex, transferCount, payload, actions, success, size, pageOffset, hasMore
     }
 }
 
@@ -43,6 +46,20 @@ struct ReceivedFile: Identifiable {
     let contentType: String
     let data: Data
     let receivedAt: Date
+}
+
+struct PhoneGalleryItem: Identifiable {
+    let id: String
+    let name: String
+    let contentType: String
+    let size: Int64
+    let dateAdded: Date?
+    let thumbnailData: Data?
+
+    var thumbnail: NSImage? {
+        guard let thumbnailData else { return nil }
+        return NSImage(data: thumbnailData)
+    }
 }
 
 private struct IncomingTransfer {
@@ -76,9 +93,15 @@ final class PhoneBridgeModel: ObservableObject {
     @Published var actionMessage: String?
     @Published var screenFrame: NSImage?
     @Published var phoneClipboardText: String?
+    @Published var remoteControlEnabled = false
+    @Published var galleryItems: [PhoneGalleryItem] = []
+    @Published var galleryStatus = "휴대폰 사진 라이브러리를 불러오세요."
+    @Published var galleryHasMore = false
+    @Published var galleryIsLoading = false
 
     private let server = MacLinkServer()
     private var incomingTransfers: [String: IncomingTransfer] = [:]
+    private var galleryDownloads = Set<String>()
 
     init() {
         let paired = PairKeyStore.load()
@@ -89,7 +112,11 @@ final class PhoneBridgeModel: ObservableObject {
             Task { @MainActor in
                 self?.status = status
                 self?.isConnected = connected
-                if !connected { self?.screenFrame = nil }
+                if !connected {
+                    self?.screenFrame = nil
+                    self?.galleryIsLoading = false
+                    self?.galleryDownloads.removeAll()
+                }
             }
         }
         server.onPaired = { [weak self] name in
@@ -150,6 +177,8 @@ final class PhoneBridgeModel: ObservableObject {
         deviceName = nil
         battery = nil
         events.removeAll()
+        galleryItems.removeAll()
+        galleryHasMore = false
         createPairingCode()
         status = "Android 앱에서 QR 코드를 스캔하세요"
     }
@@ -236,6 +265,51 @@ final class PhoneBridgeModel: ObservableObject {
         actionMessage = "Android 화면 공유 중지를 요청했습니다."
     }
 
+    func controlPhoneScreen(action: String, x: CGPoint? = nil, end: CGPoint? = nil) {
+        guard isConnected else {
+            actionMessage = "휴대폰을 연결한 뒤 다시 시도하세요."
+            return
+        }
+        guard remoteControlEnabled else {
+            actionMessage = "Android 앱의 접근성 설정에서 PhoneBridge 원격 터치를 켜세요."
+            return
+        }
+        var command: [String: Any] = ["kind": "remote_control", "action": action]
+        if let x {
+            command["x"] = Double(x.x)
+            command["y"] = Double(x.y)
+        }
+        if let end {
+            command["endX"] = Double(end.x)
+            command["endY"] = Double(end.y)
+        }
+        server.sendSecure(command)
+    }
+
+    func requestGallery(offset: Int = 0) {
+        guard isConnected else {
+            galleryStatus = "사진을 보려면 Android 휴대폰을 연결하세요."
+            return
+        }
+        if offset == 0 { galleryItems.removeAll() }
+        galleryIsLoading = true
+        galleryStatus = "휴대폰 사진을 불러오는 중…"
+        server.sendSecure(["kind": "gallery_list", "offset": offset, "limit": 40])
+    }
+
+    func downloadGalleryItem(_ item: PhoneGalleryItem) {
+        guard isConnected else { galleryStatus = "사진을 받으려면 휴대폰을 연결하세요."; return }
+        guard !galleryDownloads.contains(item.id) else { return }
+        let transferId = UUID().uuidString
+        galleryDownloads.insert(transferId)
+        galleryStatus = "\(item.name)을(를) 휴대폰에서 받는 중…"
+        server.sendSecure([
+            "kind": "gallery_fetch",
+            "assetId": item.id,
+            "transferId": transferId,
+        ])
+    }
+
     func sendMacClipboardToPhone() {
         guard isConnected else {
             actionMessage = "휴대폰을 연결한 뒤 다시 시도하세요."
@@ -262,27 +336,52 @@ final class PhoneBridgeModel: ObservableObject {
 
     func selectAndSendFile(photosOnly: Bool = false) {
         let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         if photosOnly { panel.allowedContentTypes = [.image] }
         panel.message = "Android 휴대폰으로 보낼 파일을 선택하세요."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-            guard fileSize <= 100 * 1_024 * 1_024 else {
-                actionMessage = "파일 전송은 항목당 100MB까지 지원합니다."
-                return
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        sendFiles(panel.urls)
+    }
+
+    func sendFiles(_ urls: [URL]) {
+        guard isConnected else { actionMessage = "전송하려면 휴대폰을 연결하세요."; return }
+        actionMessage = "선택한 파일을 준비하고 있습니다."
+        let linkServer = server
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var sentNames: [String] = []
+            var failures: [String] = []
+            for url in urls {
+                do {
+                    let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                    guard fileSize <= 100 * 1_024 * 1_024 else {
+                        failures.append("\(url.lastPathComponent): 100MB 초과")
+                        continue
+                    }
+                    let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                    guard data.count <= 100 * 1_024 * 1_024 else {
+                        failures.append("\(url.lastPathComponent): 100MB 초과")
+                        continue
+                    }
+                    linkServer.sendFile(
+                        name: url.lastPathComponent,
+                        contentType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                        data: data,
+                    )
+                    sentNames.append(url.lastPathComponent)
+                } catch {
+                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                }
             }
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
-            guard data.count <= 100 * 1_024 * 1_024 else {
-                actionMessage = "파일 전송은 항목당 100MB까지 지원합니다."
-                return
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !failures.isEmpty {
+                    self.actionMessage = "전송 시작 \(sentNames.count)개 · 실패 \(failures.joined(separator: ", "))"
+                } else if !sentNames.isEmpty {
+                    self.actionMessage = "\(sentNames.count)개 파일을 휴대폰으로 보내고 있습니다."
+                }
             }
-            server.sendFile(name: url.lastPathComponent, contentType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream", data: data)
-            actionMessage = "\(url.lastPathComponent)을(를) 휴대폰으로 보내고 있습니다."
-        } catch {
-            actionMessage = "파일을 읽지 못했습니다: \(error.localizedDescription)"
         }
     }
 
@@ -310,6 +409,42 @@ final class PhoneBridgeModel: ObservableObject {
     }
 
     private func receive(_ event: PhoneEvent) {
+        if event.kind == "remote_control_status" {
+            remoteControlEnabled = event.success == true
+            return
+        }
+        if event.kind == "gallery_item" {
+            guard let id = event.eventId else { return }
+            let item = PhoneGalleryItem(
+                id: id,
+                name: event.title ?? "사진",
+                contentType: event.source ?? "image/*",
+                size: event.size ?? 0,
+                dateAdded: event.timestamp.map { Date(timeIntervalSince1970: $0) },
+                thumbnailData: event.payload.flatMap { Data(base64Encoded: $0) },
+            )
+            if let existing = galleryItems.firstIndex(where: { $0.id == id }) {
+                galleryItems[existing] = item
+            } else {
+                galleryItems.append(item)
+            }
+            return
+        }
+        if event.kind == "gallery_result" {
+            galleryIsLoading = false
+            galleryHasMore = event.hasMore == true
+            galleryStatus = event.text ?? (event.success == true ? "휴대폰 사진을 불러왔습니다." : "Android 사진 권한을 확인하세요.")
+            return
+        }
+        if event.kind == "gallery_download_result" {
+            galleryStatus = event.text ?? "사진 전송 상태를 확인하세요."
+            if event.success != true, let transferId = event.eventId { galleryDownloads.remove(transferId) }
+            return
+        }
+        if event.kind == "remote_control_result" {
+            actionMessage = event.text
+            return
+        }
         if event.kind == "screen_frame" {
             if let encoded = event.payload, let data = Data(base64Encoded: encoded) {
                 screenFrame = NSImage(data: data)
@@ -346,6 +481,7 @@ final class PhoneBridgeModel: ObservableObject {
             actionMessage = event.text
             return
         }
+        events.removeAll { $0.id == event.id }
         events.insert(event, at: 0)
         events = Array(events.prefix(100))
         switch event.kind {
@@ -399,6 +535,9 @@ final class PhoneBridgeModel: ObservableObject {
         }
         incomingTransfers.removeValue(forKey: transferId)
         actionMessage = "휴대폰에서 \(transfer.name)을(를) 받았습니다."
+        if galleryDownloads.remove(transferId) != nil {
+            galleryStatus = "사진을 받았습니다. 받은 항목에서 저장할 수 있습니다."
+        }
     }
 
     private func showMacNotification(_ event: PhoneEvent) {
@@ -499,7 +638,9 @@ private enum QRCodeRenderer {
     }
 }
 
-private final class MacLinkServer {
+// Mutable connection and pairing state is confined to `queue`; file sends enter
+// the same queue through `sendSecure`, so callers may safely hand off the server.
+private final class MacLinkServer: @unchecked Sendable {
     static let port: UInt16 = 51534
     private let queue = DispatchQueue(label: "com.phonebridge.mac.network")
     private var listener: NWListener?

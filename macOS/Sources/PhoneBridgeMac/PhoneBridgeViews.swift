@@ -1,8 +1,9 @@
 import AppKit
 import Combine
 import SwiftUI
+import UniformTypeIdentifiers
 
-private let sections = ["개요", "알림", "메시지", "통화", "사진", "파일", "미디어", "폰 화면", "클립보드", "설정"]
+private let sections = ["개요", "알림", "메시지", "통화", "사진", "갤러리", "파일", "미디어", "폰 화면", "클립보드", "설정"]
 
 struct PhoneBridgeRootView: View {
     @EnvironmentObject private var model: PhoneBridgeModel
@@ -21,6 +22,7 @@ struct PhoneBridgeRootView: View {
                         case "메시지": MessagesView()
                         case "통화": CallsView()
                         case "사진": FileTransferView(photosOnly: true)
+                        case "갤러리": PhoneGalleryView()
                         case "파일": FileTransferView(photosOnly: false)
                         case "미디어": MediaControlsView()
                         case "폰 화면": ScreenIntegrationView()
@@ -112,6 +114,7 @@ private struct SidebarGroup: View {
         case "메시지": "message"
         case "통화": "phone"
         case "사진": "photo.on.rectangle.angled"
+        case "갤러리": "photo.stack"
         case "파일": "folder"
         case "미디어": "playpause.fill"
         case "폰 화면": "macbook.and.iphone"
@@ -379,11 +382,19 @@ private struct PairingCard: View {
                         Text("이 Mac에 저장된 페어링 키가 삭제됩니다.")
                     }
             } else {
-                ProgressView()
-                Text("로컬 연결 준비 중…").font(.caption).foregroundStyle(.secondary)
-            }
-            if let error = model.pairingError {
-                Text(error).font(.caption).foregroundStyle(.red).multilineTextAlignment(.center)
+                if let error = model.pairingError {
+                    Image(systemName: "qrcode.viewfinder")
+                        .font(.system(size: 38))
+                        .foregroundStyle(.orange)
+                    Text("새 페어링 코드가 필요합니다").font(.headline)
+                    Text(error).font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                } else {
+                    ProgressView()
+                    Text("로컬 연결 준비 중…").font(.caption).foregroundStyle(.secondary)
+                }
+                Button("새 QR 코드 만들기") { model.createPairingCode() }
+                    .buttonStyle(.link)
+                    .phoneBridgeHover()
             }
         }
         .padding(14)
@@ -714,6 +725,7 @@ private final class ReplyDraftModel: ObservableObject {
 
 private struct FileTransferView: View {
     @EnvironmentObject private var model: PhoneBridgeModel
+    @StateObject private var local = PhoneBridgeViewState()
     let photosOnly: Bool
     private var files: [ReceivedFile] {
         photosOnly ? model.receivedFiles.filter { $0.contentType.hasPrefix("image/") } : model.receivedFiles
@@ -760,6 +772,121 @@ private struct FileTransferView: View {
             }
         }
         .padding(28)
+        .overlay {
+            if local.isDropTargeted {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(.blue, style: StrokeStyle(lineWidth: 3, dash: [9, 6]))
+                    .padding(10)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $local.isDropTargeted) { providers in
+            guard model.isConnected else { return false }
+            let providers = providers.filter { $0.canLoadObject(ofClass: URL.self) }
+            guard !providers.isEmpty else { return false }
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { object, _ in
+                    guard let url = object else { return }
+                    DispatchQueue.main.async { model.sendFiles([url]) }
+                }
+            }
+            return true
+        }
+    }
+}
+
+private struct PhoneGalleryView: View {
+    @EnvironmentObject private var model: PhoneBridgeModel
+    private let columns = [GridItem(.adaptive(minimum: 132), spacing: 12)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 17) {
+            HStack(alignment: .top) {
+                pageHeading("휴대폰 갤러리", subtitle: "Android에서 허용한 사진을 둘러보고 원본을 Mac으로 받습니다.")
+                Spacer()
+                Button { model.requestGallery() } label: {
+                    Label("새로 고침", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+                .phoneBridgeHover()
+                .disabled(!model.isConnected || model.galleryIsLoading)
+            }
+            Label(model.galleryStatus, systemImage: model.galleryIsLoading ? "arrow.triangle.2.circlepath" : "info.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if model.galleryItems.isEmpty && !model.galleryIsLoading {
+                EmptyStateView(
+                    title: "휴대폰 사진을 불러오세요",
+                    icon: "photo.stack",
+                    detail: model.isConnected ? "Android 앱에서 사진 라이브러리 권한을 허용한 다음 새로 고침을 누르세요. Android 14 이상에서는 선택한 사진만 공유할 수 있습니다." : "갤러리를 열려면 Android 휴대폰을 연결하세요."
+                )
+                .frame(maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
+                        ForEach(model.galleryItems) { item in
+                            Button { model.downloadGalleryItem(item) } label: {
+                                VStack(alignment: .leading, spacing: 7) {
+                                    Group {
+                                        if let image = item.thumbnail {
+                                            Image(nsImage: image)
+                                                .resizable()
+                                                .scaledToFill()
+                                        } else {
+                                            ZStack {
+                                                Color.secondary.opacity(0.08)
+                                                Image(systemName: "photo")
+                                                    .font(.system(size: 28))
+                                                    .foregroundStyle(.tertiary)
+                                            }
+                                        }
+                                    }
+                                    .frame(height: 116)
+                                    .frame(maxWidth: .infinity)
+                                    .clipped()
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    Text(item.name)
+                                        .font(.caption.weight(.medium))
+                                        .lineLimit(1)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                    Text(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(8)
+                                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            }
+                            .buttonStyle(.plain)
+                            .phoneBridgeHover()
+                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.quaternary, lineWidth: 1))
+                            .help("클릭하면 원본 사진을 휴대폰에서 받습니다")
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                if model.galleryHasMore {
+                    Button("사진 더 불러오기") { model.requestGallery(offset: model.galleryItems.count) }
+                        .buttonStyle(.bordered)
+                        .disabled(model.galleryIsLoading)
+                }
+            }
+            let receivedPhotos = model.receivedFiles.filter { $0.contentType.hasPrefix("image/") }
+            if !receivedPhotos.isEmpty {
+                Text("Mac으로 받은 사진").font(.headline)
+                ForEach(receivedPhotos.prefix(4)) { file in
+                    HStack {
+                        Label(file.name, systemImage: "photo")
+                            .lineLimit(1)
+                        Spacer()
+                        Button("저장…") { model.saveReceivedFile(file) }
+                            .buttonStyle(.bordered)
+                    }
+                }
+            }
+        }
+        .padding(28)
+        .onAppear { if model.galleryItems.isEmpty { model.requestGallery() } }
     }
 }
 
@@ -809,28 +936,85 @@ private struct ScreenIntegrationView: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 Label("Android", systemImage: "smartphone").font(.headline)
-                Text("Android 앱에서 화면 공유를 시작하고 시스템 캡처를 승인하면 미리보기가 여기에 표시됩니다. 공유 중지는 Android 또는 Mac에서 할 수 있습니다.")
+                Text("Android에서 화면 공유를 승인하면 미리보기가 나타납니다. 접근성 원격 터치를 켜면 Mac에서 탭과 스와이프, 뒤로·홈 동작을 보낼 수 있습니다.")
                     .foregroundStyle(.secondary)
                 Text(model.deviceName ?? "Android 휴대폰이 연결되면 상태가 여기에 표시됩니다.")
                     .font(.caption).foregroundStyle(.tertiary)
                 if let frame = model.screenFrame {
-                    Image(nsImage: frame)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(maxHeight: 430)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Button("화면 공유 중지") { model.stopScreenMirror() }.buttonStyle(.bordered).phoneBridgeHover()
+                    PhoneScreenControlSurface(image: frame) { start, end in
+                        if hypot(end.x - start.x, end.y - start.y) > 0.035 {
+                            model.controlPhoneScreen(action: "swipe", x: start, end: end)
+                        } else {
+                            model.controlPhoneScreen(action: "tap", x: end)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 430)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    HStack(spacing: 9) {
+                        Button { model.controlPhoneScreen(action: "back") } label: { Label("뒤로", systemImage: "chevron.backward") }
+                        Button { model.controlPhoneScreen(action: "home") } label: { Label("홈", systemImage: "house") }
+                        Button { model.controlPhoneScreen(action: "recents") } label: { Label("최근 앱", systemImage: "square.on.square") }
+                        Spacer()
+                        Button("화면 공유 중지") { model.stopScreenMirror() }
+                    }
+                    .buttonStyle(.bordered)
+                    .phoneBridgeHover()
+                    if !model.remoteControlEnabled {
+                        Label("Mac에서 조작하려면 Android 앱의 ‘Mac에서 화면 조작’ 설정에서 PhoneBridge 원격 터치를 켜세요.", systemImage: "hand.tap")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 } else if model.isConnected {
                     Label("화면 공유를 시작하려면 Android 앱에서 동의를 완료하세요.", systemImage: "rectangle.on.rectangle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Text("현재는 저해상도 화면 미리보기를 제공합니다. Mac에서 터치/키보드로 Android 앱을 조작하지는 않습니다.")
+                Text("Android 시스템 화면 공유 확인과 접근성 설정은 각각 사용자가 직접 승인합니다. 접근성 서비스는 화면 내용을 읽지 않고 Mac에서 보낸 터치 입력만 실행합니다.")
                     .font(.caption).foregroundStyle(.tertiary)
             }
             .padding(18).frame(maxWidth: .infinity, alignment: .leading).phoneBridgeSurface()
             Spacer()
         }
         .padding(28)
+    }
+}
+
+private struct PhoneScreenControlSurface: View {
+    let image: NSImage
+    let onGesture: (CGPoint, CGPoint) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let bounds = geometry.size
+            let imageSize = image.size
+            let scale = min(bounds.width / max(imageSize.width, 1), bounds.height / max(imageSize.height, 1))
+            let renderedSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+            let origin = CGPoint(x: (bounds.width - renderedSize.width) / 2, y: (bounds.height - renderedSize.height) / 2)
+            let normalizedPoint: (CGPoint) -> CGPoint? = { point in
+                guard point.x >= origin.x, point.y >= origin.y,
+                      point.x <= origin.x + renderedSize.width,
+                      point.y <= origin.y + renderedSize.height else { return nil }
+                return CGPoint(
+                    x: (point.x - origin.x) / max(renderedSize.width, 1),
+                    y: (point.y - origin.y) / max(renderedSize.height, 1),
+                )
+            }
+            ZStack {
+                Color.black.opacity(0.92)
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.medium)
+                    .frame(width: renderedSize.width, height: renderedSize.height)
+                    .position(x: bounds.width / 2, y: bounds.height / 2)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 0)
+                .onEnded { value in
+                    guard let start = normalizedPoint(value.startLocation),
+                          let end = normalizedPoint(value.location) else { return }
+                    onGesture(start, end)
+                })
+        }
+        .accessibilityLabel("Android 휴대폰 화면. 탭하거나 드래그해 조작")
     }
 }
 
@@ -1107,6 +1291,7 @@ private struct PhoneBridgeHoverModifier: ViewModifier {
 
 private final class PhoneBridgeViewState: ObservableObject {
     @Published var isHovered = false
+    @Published var isDropTargeted = false
     @Published var query = ""
     @Published var confirmClear = false
     @Published var showingComposer = false

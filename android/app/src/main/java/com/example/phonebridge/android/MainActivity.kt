@@ -55,6 +55,8 @@ import com.example.phonebridge.android.link.LinkService
 import com.example.phonebridge.android.link.PairingStore
 import com.example.phonebridge.android.link.PairingPayload
 import com.example.phonebridge.android.link.ReceivedFileItem
+import com.example.phonebridge.android.link.PhoneGalleryBridge
+import com.example.phonebridge.android.remote.PhoneRemoteControlService
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
@@ -65,6 +67,8 @@ import com.example.phonebridge.android.update.PhoneBridgeUpdateState
 
 class MainActivity : ComponentActivity() {
     private var pairedName by mutableStateOf<String?>(null)
+    private var galleryAccessGranted by mutableStateOf(false)
+    private var remoteControlEnabled by mutableStateOf(false)
     private val updateManager by lazy { PhoneBridgeUpdateManager(this) }
     private val transferExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
@@ -109,10 +113,15 @@ class MainActivity : ComponentActivity() {
     private val callPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted && PairingStore.load(this) != null) startLink()
     }
+    private val galleryPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         pairedName = PairingStore.load(this)?.let { Build.MODEL ?: "Android 휴대폰" }
+        galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
+        remoteControlEnabled = PhoneRemoteControlService.isRunning()
         ConnectionState.receivedFiles.value = listReceivedFiles()
         setContent {
             val linkStatus by ConnectionState.status.collectAsState()
@@ -250,6 +259,18 @@ class MainActivity : ComponentActivity() {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) callPermission.launch(Manifest.permission.READ_PHONE_STATE)
                             }
                         )
+                        PermissionCard(
+                            title = "사진 라이브러리",
+                            detail = if (galleryAccessGranted) "허용됨 · 사용자가 허용한 범위의 사진만 Mac 갤러리에 표시합니다" else "Mac에서 사진을 둘러볼 때 사용합니다. Android 14 이상에서는 선택한 사진만 허용할 수 있습니다",
+                            button = if (galleryAccessGranted) "사진 접근 범위 변경" else "사진 접근 허용",
+                            onClick = ::requestGalleryPermission,
+                        )
+                        PermissionCard(
+                            title = "Mac에서 화면 조작",
+                            detail = if (remoteControlEnabled) "허용됨 · 화면 공유 중 탭/스와이프만 전달하며 화면의 글자나 접근성 트리는 읽지 않습니다" else "선택 권한 · 화면 공유와 별도로 Android 접근성 설정에서 직접 켜야 합니다",
+                            button = if (remoteControlEnabled) "접근성 설정 관리" else "원격 터치 설정",
+                            onClick = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                        )
 
                         SectionHeading("사진과 파일", "필요한 항목만 골라 기기 간 전송")
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -298,6 +319,7 @@ class MainActivity : ComponentActivity() {
         }
 
         if (PairingStore.load(this) != null) startLink()
+        handleSharedIntent(intent)
         updateManager.checkForUpdates(force = false)
 
     }
@@ -305,12 +327,20 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         updateManager.onResume()
+        galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
+        remoteControlEnabled = PhoneRemoteControlService.isRunning()
     }
 
     override fun onDestroy() {
         updateManager.close()
         transferExecutor.shutdown()
         super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleSharedIntent(intent)
     }
 
     private fun launchScanner() {
@@ -340,11 +370,27 @@ class MainActivity : ComponentActivity() {
         screenCapture.launch(manager.createScreenCaptureIntent())
     }
 
+    private fun requestGalleryPermission() {
+        val permissions = when {
+            Build.VERSION.SDK_INT >= 34 -> arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED,
+            )
+            Build.VERSION.SDK_INT >= 33 -> arrayOf(Manifest.permission.READ_MEDIA_IMAGES)
+            else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        }
+        galleryPermission.launch(permissions)
+    }
+
     private fun stopScreenMirror() {
         startService(Intent(this, LinkService::class.java).setAction(LinkService.ACTION_STOP_SCREEN_MIRROR))
     }
 
     private fun sendPickedItem(uri: Uri) {
+        if (PairingStore.load(this) == null) {
+            Toast.makeText(this, "먼저 Mac과 페어링한 다음 공유 메뉴에서 다시 보내세요.", Toast.LENGTH_LONG).show()
+            return
+        }
         transferExecutor.execute {
             val result = runCatching {
                 val name = contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
@@ -364,12 +410,29 @@ class MainActivity : ComponentActivity() {
                     }
                     output.toByteArray()
                 } ?: error("파일을 열 수 없습니다.")
-                check(LinkService.sendFile(this, name, mime, bytes)) { "Mac과 연결된 뒤 파일을 전송하세요." }
+                val deadline = System.currentTimeMillis() + 20_000
+                while (!LinkService.isConnected() && System.currentTimeMillis() < deadline) Thread.sleep(250)
+                check(LinkService.sendFile(this, name, mime, bytes)) { "Mac과 연결되지 않았습니다. 같은 Wi‑Fi에서 다시 시도하세요." }
                 name
             }
             runOnUiThread {
                 result.onSuccess { name -> Toast.makeText(this, "$name 전송을 시작했습니다.", Toast.LENGTH_SHORT).show() }
                     .onFailure { Toast.makeText(this, it.localizedMessage ?: "파일 전송을 시작하지 못했습니다.", Toast.LENGTH_LONG).show() }
+            }
+        }
+    }
+
+    private fun handleSharedIntent(intent: Intent?) {
+        when (intent?.action) {
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION")
+                val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                uri?.let(::sendPickedItem)
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                @Suppress("DEPRECATION")
+                val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+                uris.forEach(::sendPickedItem)
             }
         }
     }

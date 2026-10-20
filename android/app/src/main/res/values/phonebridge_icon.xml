@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="phone_remote_control_description">PhoneBridge가 Mac에서 시작한 화면 공유 중에만 사용자가 보낸 탭과 스와이프를 휴대폰에 전달합니다. 화면의 텍스트나 접근성 정보를 읽지 않습니다.</string>
     <color name="phonebridge_icon_background">#131A32</color>
 </resources>

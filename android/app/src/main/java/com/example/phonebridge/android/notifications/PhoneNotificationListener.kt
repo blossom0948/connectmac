@@ -78,6 +78,11 @@ class PhoneNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         active = this
+        runCatching { activeNotifications.orEmpty() }
+            .getOrDefault(emptyArray())
+            .sortedBy { it.postTime }
+            .takeLast(50)
+            .forEach(::onNotificationPosted)
     }
 
     override fun onListenerDisconnected() {
