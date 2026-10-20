@@ -17,7 +17,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -63,7 +62,7 @@ class PhoneBridgeUpdateManager(private val activity: ComponentActivity) {
         mutableState.value = PhoneBridgeUpdateState.Checking
         scope.launch {
             val result = runCatching {
-                withContext(Dispatchers.IO) { fetchRelease() }
+                withContext(Dispatchers.IO) { PhoneBridgeUpdateCatalog.fetchLatestRelease() }
             }
             context.getSharedPreferences(PREFERENCES, 0).edit().putLong(KEY_LAST_CHECK, System.currentTimeMillis()).apply()
             result.onSuccess { release ->
@@ -150,33 +149,6 @@ class PhoneBridgeUpdateManager(private val activity: ComponentActivity) {
             }
     }
 
-    private fun fetchRelease(): PhoneBridgeRelease {
-        val connection = URL(UPDATE_MANIFEST_URL).openConnection() as HttpURLConnection
-        try {
-            connection.connectTimeout = NETWORK_TIMEOUT_MS
-            connection.readTimeout = NETWORK_TIMEOUT_MS
-            connection.setRequestProperty("Accept", "application/json")
-            connection.setRequestProperty("User-Agent", "PhoneBridge-Android/${BuildConfig.VERSION_NAME}")
-            connection.instanceFollowRedirects = true
-            check(connection.responseCode in 200..299) { "업데이트 서버 응답 오류 (${connection.responseCode})" }
-            val json = connection.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-            val manifest = JSONObject(json)
-            val release = PhoneBridgeRelease(
-                versionName = manifest.getString("versionName"),
-                versionCode = manifest.getLong("versionCode"),
-                apkUrl = manifest.getString("apkUrl"),
-                sha256 = manifest.getString("sha256").lowercase(Locale.ROOT).removePrefix("sha256:"),
-                notes = manifest.optString("notes", "PhoneBridge 업데이트"),
-            )
-            require(release.apkUrl.startsWith(RELEASE_APK_PREFIX)) { "허용되지 않은 업데이트 주소입니다." }
-            require(release.sha256.matches(Regex("[a-f0-9]{64}"))) { "업데이트 해시가 올바르지 않습니다." }
-            require(release.versionCode > 0 && release.versionName.isNotBlank()) { "업데이트 버전 정보가 올바르지 않습니다." }
-            return release
-        } finally {
-            connection.disconnect()
-        }
-    }
-
     private suspend fun downloadAndVerify(release: PhoneBridgeRelease): File {
         require(release.apkUrl.startsWith(RELEASE_APK_PREFIX)) { "허용되지 않은 업데이트 주소입니다." }
         val updatesDirectory = File(context.cacheDir, "updates").apply { mkdirs() }
@@ -236,13 +208,12 @@ class PhoneBridgeUpdateManager(private val activity: ComponentActivity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else versionCode.toLong()
 
     companion object {
-        private const val UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/blossom0948/connectmac/main/updates/phonebridge-update.json"
         private const val RELEASE_APK_PREFIX = "https://github.com/blossom0948/connectmac/releases/download/"
         // The APKs are signed with the existing local Android debug certificate so current sideload installs upgrade in place.
         private const val RELEASE_SIGNER_SHA256 = "669674a2114fb59d85c56bba774b89fec9ce7f7ee79825769826130362a091c9"
-        private const val PREFERENCES = "phonebridge_updates"
-        private const val KEY_LAST_CHECK = "last_check_at"
-        private const val CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000L
+        private const val PREFERENCES = PhoneBridgeUpdatePreferences.PREFERENCES
+        private const val KEY_LAST_CHECK = PhoneBridgeUpdatePreferences.KEY_LAST_CHECK
+        private const val CHECK_INTERVAL_MS = 15 * 60 * 1000L
         private const val NETWORK_TIMEOUT_MS = 15_000
         private const val DOWNLOAD_TIMEOUT_MS = 120_000
         private const val MAX_APK_BYTES = 200L * 1024 * 1024

@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.0</string>
+    <string>0.3.1</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>4</string>
     <key>SUFeedURL</key>
     <string>https://raw.githubusercontent.com/blossom0948/connectmac/main/updates/appcast.xml</string>
     <key>SUPublicEDKey</key>
@@ -25,6 +25,8 @@
     <key>SUAutomaticallyUpdate</key>
     <true/>
     <key>SUScheduledCheckInterval</key>
+    <integer>3600</integer>
+    <key>SUScheduledImpatientCheckInterval</key>
     <integer>86400</integer>
     <key>SURequireSignedFeed</key>
     <true/>

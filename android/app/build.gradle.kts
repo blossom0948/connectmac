@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.phonebridge.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3000
-        versionName = "0.3.0"
+        versionCode = 3001
+        versionName = "0.3.1"
     }
 
     buildFeatures {
@@ -31,6 +31,7 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
+    implementation("androidx.work:work-runtime:2.12.0")
     implementation(platform("androidx.compose:compose-bom:2025.06.01"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.ui:ui")

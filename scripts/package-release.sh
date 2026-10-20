@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: scripts/package-release.sh <version> (for example 0.3.0)" >&2
+  echo "Usage: scripts/package-release.sh <version> (for example 0.3.1)" >&2
   exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,7 +79,7 @@ cat > "$RELEASE_DIR/phonebridge-update.json" <<EOF
   "versionCode": $VERSION_CODE,
   "apkUrl": "${DOWNLOAD_PREFIX}PhoneBridge-android.apk",
   "sha256": "$APK_SHA256",
-  "notes": "QR 코드 재생성, Android 사진 갤러리, 원격 화면 조작, 파일 공유를 추가했습니다."
+  "notes": "새 버전 자동 확인, 앱 내 업데이트 안내, Android 업데이트 알림을 추가했습니다."
 }
 EOF
 
@@ -105,11 +105,10 @@ cp "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$SPARKLE_STAGE/PhoneBridge-macOS.dmg"
 cat > "$SPARKLE_STAGE/PhoneBridge-macOS.md" <<EOF
 PhoneBridge $VERSION
 
-- Mac에서 QR 코드 만료 후 새 페어링 코드를 바로 만들 수 있습니다.
-- Android 사진 갤러리 탐색과 선택한 원본 다운로드를 추가했습니다.
-- 화면 공유 중 Mac에서 Android를 탭·스와이프하고 시스템 이동을 제어할 수 있습니다.
-- Mac 끌어놓기와 Android 공유 메뉴 파일 전송을 추가했습니다.
-- 앱 간 업데이트와 연결 상태·권한 안내를 다듬었습니다.
+- Mac은 실행 시 즉시, 이후 매시간 새 버전을 확인하고 앱과 메뉴 막대에 표시합니다.
+- Android는 실행 시 확인하고, 사용 중 15분 간격 및 백그라운드 주기 작업으로 새 버전을 찾습니다.
+- Android 백그라운드에서 새 버전을 발견하면 해당 버전에 대해 한 번만 알립니다.
+- Mac은 업데이트를 백그라운드에서 준비하고, Android는 앱 안에서 받은 뒤 시스템 설치를 승인합니다.
 EOF
 "$SPARKLE_BIN/generate_appcast" --download-url-prefix "$DOWNLOAD_PREFIX" --embed-release-notes "$SPARKLE_STAGE"
 cp "$SPARKLE_STAGE/appcast.xml" "$RELEASE_DIR/appcast.xml"

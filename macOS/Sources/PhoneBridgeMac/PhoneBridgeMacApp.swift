@@ -41,6 +41,13 @@ private struct MenuBarCommands: View {
     var body: some View {
         Text(model.deviceName ?? "PhoneBridge")
         Text(model.isConnected ? "휴대폰 연결됨" : "같은 Wi‑Fi에서 연결 대기 중")
+        if let version = updater.availableUpdateVersion {
+            Text("v\(version) 업데이트 사용 가능")
+            Button("업데이트 보기") {
+                openWindow(id: "main")
+                updater.checkForUpdates()
+            }
+        }
         Divider()
         Button("PhoneBridge 열기") { openWindow(id: "main") }
         Button("알림 보기") {

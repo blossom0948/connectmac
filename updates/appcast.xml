@@ -6,6 +6,22 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     <channel>
         <title>PhoneBridge</title>
         <item>
+            <title>0.3.1</title>
+            <pubDate>Tue, 20 Oct 2026 15:10:30 +0900</pubDate>
+            <sparkle:version>4</sparkle:version>
+            <sparkle:shortVersionString>0.3.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[PhoneBridge 0.3.1
+
+- Mac은 실행 시 즉시, 이후 매시간 새 버전을 확인하고 앱과 메뉴 막대에 표시합니다.
+- Android는 실행 시 확인하고, 사용 중 15분 간격 및 백그라운드 주기 작업으로 새 버전을 찾습니다.
+- Android 백그라운드에서 새 버전을 발견하면 해당 버전에 대해 한 번만 알립니다.
+- Mac은 업데이트를 백그라운드에서 준비하고, Android는 앱 안에서 받은 뒤 시스템 설치를 승인합니다.
+]]></description>
+            <enclosure url="https://github.com/blossom0948/connectmac/releases/download/v0.3.1/PhoneBridge-macOS.dmg" length="3559848" type="application/octet-stream" sparkle:edSignature="hZpVMlRexVK8YIVEcL1zyon+I/Vne16r0ouLtf32gE5XWj4yBh46N/2Z9+7icKiHm/ijEo8qWTZJSne65vDLBw=="/>
+        </item>
+        <item>
             <title>0.3.0</title>
             <pubDate>Tue, 20 Oct 2026 14:49:40 +0900</pubDate>
             <sparkle:version>3</sparkle:version>
@@ -39,6 +55,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: iHnphusiYNddZIlDdecTqBo8B4R3tBZcTcxJ+/y2y7eS6LE2q7qoCiu6NdIIY1ONdv71EG7oZOKf5Lzf49IODQ==
-length: 2591
+edSignature: m36STY9qA+XRhd+q+byG39UA26cYvJeBKWy8FiG6uCCa4n/s+8nXs7yDN2H0rMbg4rZvXNvN3ZVL1BGYQPUEAQ==
+length: 3861
 -->

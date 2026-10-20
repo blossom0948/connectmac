@@ -8,6 +8,8 @@ import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.provider.Settings
@@ -64,6 +66,9 @@ import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
 import com.example.phonebridge.android.update.PhoneBridgeUpdateManager
 import com.example.phonebridge.android.update.PhoneBridgeUpdateState
+import com.example.phonebridge.android.update.PhoneBridgeUpdatePreferences
+import com.example.phonebridge.android.update.PhoneBridgeUpdateScheduler
+import com.example.phonebridge.android.update.PhoneBridgeUpdateWorker
 
 class MainActivity : ComponentActivity() {
     private var pairedName by mutableStateOf<String?>(null)
@@ -71,6 +76,18 @@ class MainActivity : ComponentActivity() {
     private var remoteControlEnabled by mutableStateOf(false)
     private val updateManager by lazy { PhoneBridgeUpdateManager(this) }
     private val transferExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val updateCheckHandler = Handler(Looper.getMainLooper())
+    private val foregroundUpdateCheck = object : Runnable {
+        override fun run() {
+            if (isFinishing || isDestroyed) return
+            getSharedPreferences(PhoneBridgeUpdatePreferences.PREFERENCES, MODE_PRIVATE)
+                .edit()
+                .putLong(PhoneBridgeUpdatePreferences.KEY_LAST_FOREGROUND, System.currentTimeMillis())
+                .apply()
+            updateManager.checkForUpdates(force = false)
+            updateCheckHandler.postDelayed(this, FOREGROUND_UPDATE_CHECK_INTERVAL_MS)
+        }
+    }
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let(::sendPickedItem)
@@ -320,18 +337,32 @@ class MainActivity : ComponentActivity() {
 
         if (PairingStore.load(this) != null) startLink()
         handleSharedIntent(intent)
-        updateManager.checkForUpdates(force = false)
+        PhoneBridgeUpdateScheduler.schedule(applicationContext)
+        updateManager.checkForUpdates(force = true)
 
     }
 
     override fun onResume() {
         super.onResume()
         updateManager.onResume()
+        getSharedPreferences(PhoneBridgeUpdatePreferences.PREFERENCES, MODE_PRIVATE)
+            .edit()
+            .putLong(PhoneBridgeUpdatePreferences.KEY_LAST_FOREGROUND, System.currentTimeMillis())
+            .apply()
+        updateManager.checkForUpdates(force = false)
+        updateCheckHandler.removeCallbacks(foregroundUpdateCheck)
+        updateCheckHandler.postDelayed(foregroundUpdateCheck, FOREGROUND_UPDATE_CHECK_INTERVAL_MS)
         galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
         remoteControlEnabled = PhoneRemoteControlService.isRunning()
     }
 
+    override fun onPause() {
+        updateCheckHandler.removeCallbacks(foregroundUpdateCheck)
+        super.onPause()
+    }
+
     override fun onDestroy() {
+        updateCheckHandler.removeCallbacks(foregroundUpdateCheck)
         updateManager.close()
         transferExecutor.shutdown()
         super.onDestroy()
@@ -341,6 +372,9 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleSharedIntent(intent)
+        if (intent.getBooleanExtra(PhoneBridgeUpdateWorker.EXTRA_UPDATE_NOTICE, false)) {
+            updateManager.checkForUpdates(force = true)
+        }
     }
 
     private fun launchScanner() {
@@ -359,6 +393,10 @@ class MainActivity : ComponentActivity() {
         }
         val intent = Intent(this, LinkService::class.java).setAction(LinkService.ACTION_START)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+    }
+
+    companion object {
+        private const val FOREGROUND_UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000L
     }
 
     private fun requestScreenMirror() {
@@ -512,7 +550,7 @@ private fun PhoneBridgeUpdateState.description(): String = when (this) {
     PhoneBridgeUpdateState.Idle -> "최신 버전을 앱 안에서 확인하고 설치할 수 있습니다."
     PhoneBridgeUpdateState.Checking -> "최신 PhoneBridge 버전을 확인하고 있습니다."
     PhoneBridgeUpdateState.UpToDate -> "현재 최신 버전입니다."
-    is PhoneBridgeUpdateState.Available -> "v${release.versionName} 업데이트가 있습니다. 앱 안에서 내려받습니다. ${release.notes}"
+    is PhoneBridgeUpdateState.Available -> "v${release.versionName} 업데이트가 있습니다. 앱에서 내려받고 Android 설치 화면에서 승인하세요. ${release.notes}"
     is PhoneBridgeUpdateState.Downloading -> "v${release.versionName} 업데이트를 안전하게 내려받고 있습니다."
     is PhoneBridgeUpdateState.Ready -> "다운로드 파일과 앱 서명을 확인했습니다. 시스템 설치를 진행할 수 있습니다."
     is PhoneBridgeUpdateState.InstallPermissionRequired -> "이 앱에서 설치하도록 Android 설정에서 한 번 허용한 뒤 돌아오세요."

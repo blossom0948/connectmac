@@ -185,6 +185,7 @@ private struct SidebarNavigationRow: View {
 
 private struct AppControlBar: View {
     @EnvironmentObject private var model: PhoneBridgeModel
+    @EnvironmentObject private var updater: PhoneBridgeUpdater
 
     var body: some View {
         HStack(spacing: 10) {
@@ -192,6 +193,18 @@ private struct AppControlBar: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(model.isConnected ? .green : .secondary)
                 .help(model.status)
+            Spacer(minLength: 8)
+            if let version = updater.availableUpdateVersion {
+                Button { updater.checkForUpdates() } label: {
+                    Label("v\(version) 업데이트", systemImage: "arrow.down.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                }
+                .buttonStyle(.plain)
+                .phoneBridgeHover()
+                .help("새 버전이 있습니다. 업데이트 정보를 열어요.")
+                .accessibilityIdentifier("available-update")
+            }
             Button {
                 model.findPhone()
             } label: {
@@ -1231,8 +1244,13 @@ private struct SettingsView: View {
             GroupBox("앱 업데이트") {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("현재 버전 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "알 수 없음")")
-                    Text("새 버전을 확인하고 PhoneBridge 안에서 업데이트할 수 있습니다.")
-                        .foregroundStyle(.secondary)
+                    if let version = updater.availableUpdateVersion {
+                        Text("v\(version) 업데이트를 자동으로 확인했습니다. 가능한 경우 백그라운드에서 준비하고, 앱을 종료할 때 적용합니다.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("업데이트를 자동으로 확인합니다. 새 버전은 백그라운드에서 준비되며, 여기에서 진행 상태를 확인할 수 있습니다.")
+                            .foregroundStyle(.secondary)
+                    }
                     Button("업데이트 확인…") { updater.checkForUpdates() }
                         .buttonStyle(.borderedProminent)
                         .disabled(!updater.canCheckForUpdates)
