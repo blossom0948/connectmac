@@ -5,6 +5,7 @@ Mac과 Android 휴대폰을 같은 로컬 Wi‑Fi에서 연결하는 앱입니�
 ## 현재 구현된 기능
 
 - QR 코드로 최초 페어링하고 같은 Wi‑Fi에서 Bonjour/NSD로 자동 재연결
+- Android가 15초마다 암호화된 연결 확인 신호를 보내고, 45초 동안 Mac 응답이 없으면 재검색합니다. 네트워크가 돌아오면 1초부터 최대 30초 간격으로 다시 연결을 시도하며 Mac 수신기도 오류 후 자동 복구합니다.
 - 페어링 키를 Mac Keychain과 Android Keystore 기반 저장소에 보관하고 연결 이벤트와 명령을 AES‑GCM으로 암호화
 - Android 알림을 Mac 앱과 macOS 알림 배너로 전달하고 Mac에서 휴대폰 알림 지우기
 - 알림 접근을 켜면 현재 휴대폰에 떠 있는 알림도 가져오고 새 알림을 실시간 동기화
@@ -89,10 +90,10 @@ cd android
 Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.gradle.kts`에서 같은 값으로 올리고 Android `versionCode`도 증가시킨 뒤 다음 명령을 실행합니다.
 
 ```sh
-scripts/package-release.sh 0.3.1
+scripts/package-release.sh 0.3.2
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.1/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.1` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.2/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.2` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 
@@ -104,7 +105,7 @@ scripts/package-release.sh 0.3.1
 6. Mac에서 화면을 조작하려면 Android **접근성 → PhoneBridge 원격 터치**를 직접 켭니다. 화면 공유 동의와는 별개입니다.
 7. 필요할 때 파일·사진 전송, 클립보드 보내기, 화면 공유 기능을 사용합니다. 화면 공유는 Android 시스템 확인 창에서 매번 허용해야 합니다.
 
-연결이 끊겨도 페어링 정보가 남아 있으면 같은 네트워크에서 Android 앱 서비스가 Mac을 다시 찾습니다. 다른 휴대폰으로 바꾸려면 Mac의 QR 페어링 카드를 먼저 **기기 연결 해제**하고 새 휴대폰에서 다시 스캔합니다.
+연결이 끊겨도 페어링 정보가 남아 있으면 Android 서비스가 암호화된 확인 신호로 끊긴 연결을 감지하고 같은 네트워크에서 Mac을 다시 찾습니다. Android는 재연결 간격을 최대 30초까지 늘려 계속 시도하고, Mac은 로컬 연결 수신기를 자동으로 다시 시작합니다. 게스트 Wi‑Fi, 공유기 기기 간 통신 차단, Android 제조사별 백그라운드 절전 설정은 재연결을 막거나 늦출 수 있습니다. 다른 휴대폰으로 바꾸려면 Mac의 QR 페어링 카드를 먼저 **기기 연결 해제**하고 새 휴대폰에서 다시 스캔합니다.
 
 ## 개인정보 및 저장
 

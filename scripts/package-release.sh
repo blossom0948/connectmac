@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: scripts/package-release.sh <version> (for example 0.3.1)" >&2
+  echo "Usage: scripts/package-release.sh <version> (for example 0.3.2)" >&2
   exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,7 +79,7 @@ cat > "$RELEASE_DIR/phonebridge-update.json" <<EOF
   "versionCode": $VERSION_CODE,
   "apkUrl": "${DOWNLOAD_PREFIX}PhoneBridge-android.apk",
   "sha256": "$APK_SHA256",
-  "notes": "새 버전 자동 확인, 앱 내 업데이트 안내, Android 업데이트 알림을 추가했습니다."
+  "notes": "연결 상태 확인 신호와 Wi-Fi 전환 후 자동 재연결을 개선했습니다."
 }
 EOF
 
@@ -105,10 +105,9 @@ cp "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$SPARKLE_STAGE/PhoneBridge-macOS.dmg"
 cat > "$SPARKLE_STAGE/PhoneBridge-macOS.md" <<EOF
 PhoneBridge $VERSION
 
-- Mac은 실행 시 즉시, 이후 매시간 새 버전을 확인하고 앱과 메뉴 막대에 표시합니다.
-- Android는 실행 시 확인하고, 사용 중 15분 간격 및 백그라운드 주기 작업으로 새 버전을 찾습니다.
-- Android 백그라운드에서 새 버전을 발견하면 해당 버전에 대해 한 번만 알립니다.
-- Mac은 업데이트를 백그라운드에서 준비하고, Android는 앱 안에서 받은 뒤 시스템 설치를 승인합니다.
+- Android와 Mac은 암호화된 연결 확인 신호를 사용해 죽은 연결을 감지합니다.
+- Wi-Fi 연결이 끊기거나 바뀌면 Android가 Bonjour 검색으로 Mac을 다시 찾고, 재시도 간격은 최대 30초까지 늘어납니다.
+- Mac의 로컬 TCP 수신기가 오류로 중단되면 자동으로 다시 시작합니다.
 EOF
 "$SPARKLE_BIN/generate_appcast" --download-url-prefix "$DOWNLOAD_PREFIX" --embed-release-notes "$SPARKLE_STAGE"
 cp "$SPARKLE_STAGE/appcast.xml" "$RELEASE_DIR/appcast.xml"

@@ -15,6 +15,8 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
+import android.os.SystemClock
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
@@ -39,6 +41,8 @@ import java.net.InetAddress
 import java.net.Socket
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import android.net.nsd.NsdManager
@@ -72,25 +76,30 @@ class LinkService : Service() {
         private const val PHONE_ACTION_CHANNEL_ID = "phonebridge_phone_actions"
         private const val NOTIFICATION_ID = 4101
         private const val SERVICE_TYPE = "_phonebridge._tcp."
+        private const val HEARTBEAT_INTERVAL_MS = 15_000L
+        private const val HEARTBEAT_TIMEOUT_MS = 45_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
-        @Volatile private var activeSocket: Socket? = null
-        @Volatile private var activeWriter: BufferedWriter? = null
-        @Volatile private var activeKey: ByteArray? = null
+        private val heartbeatScheduler = Executors.newSingleThreadScheduledExecutor()
+        private val connectionLock = Any()
+        private data class ActiveSession(val socket: Socket, val writer: BufferedWriter, val key: ByteArray)
+        @Volatile private var activeSession: ActiveSession? = null
+        @Volatile private var connecting = false
+        @Volatile private var lastHeartbeatAt = 0L
 
         fun sendEvent(context: Context, event: JSONObject) {
-            val key = activeKey ?: return
-            val writer = activeWriter ?: return
+            val session = activeSession ?: return
             runCatching {
-                val line = LinkCrypto.seal(key, event).toString()
-                synchronized(writer) {
-                    writer.write(line)
-                    writer.newLine()
-                    writer.flush()
+                val line = LinkCrypto.seal(session.key, event).toString()
+                synchronized(session.writer) {
+                    if (activeSession !== session || session.socket.isClosed) return
+                    session.writer.write(line)
+                    session.writer.newLine()
+                    session.writer.flush()
                 }
             }
         }
 
-        fun isConnected(): Boolean = activeSocket?.isConnected == true && activeSocket?.isClosed == false && activeKey != null
+        fun isConnected(): Boolean = activeSession?.let { it.socket.isConnected && !it.socket.isClosed } == true
 
         fun sendRemoteControlStatus(context: Context) {
             val enabled = PhoneRemoteControlService.isRunning()
@@ -136,6 +145,12 @@ class LinkService : Service() {
     private var legacyCallListener: PhoneStateListener? = null
     private var batteryReceiver: android.content.BroadcastReceiver? = null
     private var retryScheduled = false
+    private var retryAttempt = 0
+    private val retryLock = Any()
+    private val discoveryLock = Any()
+    private val retryHandler = Handler(Looper.getMainLooper())
+    private var heartbeatFuture: ScheduledFuture<*>? = null
+    @Volatile private var resolvingService = false
     private var findPhoneTone: ToneGenerator? = null
     private var mediaProjection: MediaProjection? = null
     private var projectionCallback: MediaProjection.Callback? = null
@@ -315,11 +330,18 @@ class LinkService : Service() {
     }
 
     private fun connect(host: String, port: Int, secret: ByteArray) {
-        if (activeSocket?.isConnected == true) return
-        runCatching {
+        synchronized(connectionLock) {
+            if (isConnected() || connecting) return
+            connecting = true
+        }
+        var candidate: Socket? = null
+        try {
             val socket = Socket()
+            candidate = socket
             socket.connect(java.net.InetSocketAddress(host, port), 5_000)
             socket.tcpNoDelay = true
+            socket.keepAlive = true
+            socket.soTimeout = HEARTBEAT_TIMEOUT_MS.toInt()
             val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
             val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
             val challengeMessage = JSONObject(reader.readLine())
@@ -337,35 +359,70 @@ class LinkService : Service() {
             val expected = LinkCrypto.hmac(secret, "welcome|${LinkCrypto.b64(nonce)}|$deviceName")
             check(expected.contentEquals(LinkCrypto.fromB64(welcome.getString("proof"))))
             val sessionKey = LinkCrypto.deriveSessionKey(secret, nonce)
-            activeSocket = socket
-            activeWriter = writer
-            activeKey = sessionKey
-            retryScheduled = false
+            synchronized(connectionLock) {
+                activeSession?.takeIf { it.socket !== socket }?.let { runCatching { it.socket.close() } }
+                activeSession = ActiveSession(socket, writer, sessionKey)
+                lastHeartbeatAt = SystemClock.elapsedRealtime()
+                connecting = false
+            }
+            heartbeatFuture?.cancel(false)
+            heartbeatFuture = heartbeatScheduler.scheduleAtFixedRate({
+                if (activeSession?.socket !== socket || socket.isClosed) return@scheduleAtFixedRate
+                if (SystemClock.elapsedRealtime() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
+                    handleConnectionLoss(socket, "Mac 응답이 없어 다시 연결하는 중…")
+                    return@scheduleAtFixedRate
+                }
+                sendEvent(this, JSONObject().put("kind", "heartbeat_ping"))
+            }, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+            synchronized(retryLock) {
+                retryAttempt = 0
+                retryScheduled = false
+                retryHandler.removeCallbacksAndMessages(null)
+            }
+            stopDiscovery()
             ConnectionState.status.value = "Mac에 연결됨"
             sendBatterySnapshot()
             sendRemoteControlStatus(this)
             executor.execute { readServer(socket, reader, sessionKey) }
-        }.onFailure {
+        } catch (error: Exception) {
+            candidate?.let { runCatching { it.close() } }
+            synchronized(connectionLock) {
+                if (candidate != null && activeSession?.socket === candidate) clearSocket(candidate)
+                connecting = false
+            }
             ConnectionState.status.value = "Mac을 찾지 못했습니다 · 로컬 Wi‑Fi에서 검색 중"
-            startDiscovery(secret)
+            scheduleDiscovery()
         }
     }
 
     private fun readServer(socket: Socket, reader: BufferedReader, sessionKey: ByteArray) {
-        runCatching {
+        try {
             while (!socket.isClosed) {
                 val line = reader.readLine() ?: break
                 val command = LinkCrypto.open(sessionKey, JSONObject(line))
-                handleCommand(command)
+                if (command.optString("kind") == "heartbeat_pong") {
+                    lastHeartbeatAt = SystemClock.elapsedRealtime()
+                } else {
+                    handleCommand(command)
+                }
             }
+        } catch (_: Exception) {
+            // A read timeout is also a link failure; heartbeat/retry below restores the session.
         }
-        if (activeSocket === socket) {
-            stopDiscovery()
-            stopScreenMirror(notifyMac = false)
-            clearSocket()
-            ConnectionState.status.value = "연결이 끊어졌습니다 · 다시 연결 중"
-            scheduleDiscovery()
+        if (activeSession?.socket === socket) {
+            handleConnectionLoss(socket, "연결이 끊어졌습니다 · 다시 연결 중")
         }
+    }
+
+    private fun handleConnectionLoss(socket: Socket, status: String) {
+        synchronized(connectionLock) {
+            if (activeSession?.socket !== socket) return
+            clearSocket(socket)
+        }
+        stopDiscovery()
+        stopScreenMirror(notifyMac = false)
+        ConnectionState.status.value = status
+        scheduleDiscovery()
     }
 
     private fun handleCommand(command: JSONObject) {
@@ -586,22 +643,33 @@ class LinkService : Service() {
     }
 
     private fun startDiscovery(secret: ByteArray) {
-        if (discoveryListener != null) return
+        synchronized(discoveryLock) {
+            if (discoveryListener != null) return
+        }
         val manager = getSystemService(NSD_SERVICE) as NsdManager
         nsdManager = manager
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) = Unit
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (service.serviceType.trimEnd('.') != SERVICE_TYPE.trimEnd('.')) return
-                if (service.serviceName == "PhoneBridge-Mac") {
+                if (service.serviceName.startsWith("PhoneBridge-Mac") && !resolvingService) {
+                    resolvingService = true
                     @Suppress("DEPRECATION")
                     manager.resolveService(service, object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
+                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                            resolvingService = false
+                            stopDiscovery()
+                            scheduleDiscovery()
+                        }
                         override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
+                            resolvingService = false
                             val address: InetAddress? = serviceInfo.host
                             if (address != null) {
                                 stopDiscovery()
                                 executor.execute { connect(address.hostAddress ?: return@execute, serviceInfo.port, secret) }
+                            } else {
+                                stopDiscovery()
+                                scheduleDiscovery()
                             }
                         }
                     })
@@ -609,42 +677,72 @@ class LinkService : Service() {
             }
             override fun onServiceLost(service: NsdServiceInfo) = Unit
             override fun onDiscoveryStopped(serviceType: String) = Unit
-            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) { stopDiscovery() }
-            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) { stopDiscovery() }
+            override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                stopDiscovery()
+                scheduleDiscovery()
+            }
+            override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
+                stopDiscovery()
+            }
         }
-        discoveryListener = listener
+        synchronized(discoveryLock) {
+            if (discoveryListener != null) return
+            discoveryListener = listener
+        }
         runCatching { manager.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
-            .onFailure { discoveryListener = null }
+            .onFailure {
+                synchronized(discoveryLock) {
+                    if (discoveryListener === listener) discoveryListener = null
+                }
+                scheduleDiscovery()
+            }
     }
 
     private fun scheduleDiscovery() {
-        if (retryScheduled) return
-        retryScheduled = true
-        executor.execute {
-            Thread.sleep(2_500)
-            retryScheduled = false
-            PairingStore.load(this)?.let { startDiscovery(it.secret) }
+        synchronized(retryLock) {
+            if (retryScheduled) return
+            retryScheduled = true
+            val delay = (1_000L shl retryAttempt.coerceAtMost(5)).coerceAtMost(30_000L)
+            retryAttempt = (retryAttempt + 1).coerceAtMost(5)
+            retryHandler.postDelayed({
+                synchronized(retryLock) { retryScheduled = false }
+                val pairing = PairingStore.load(this) ?: return@postDelayed
+                if (!isConnected()) startDiscovery(pairing.secret)
+            }, delay)
         }
     }
 
     private fun stopDiscovery() {
-        val listener = discoveryListener ?: return
+        val listener = synchronized(discoveryLock) {
+            val current = discoveryListener
+            discoveryListener = null
+            resolvingService = false
+            current
+        } ?: return
         runCatching { nsdManager?.stopServiceDiscovery(listener) }
-        discoveryListener = null
     }
 
     private fun stopLink() {
+        synchronized(retryLock) {
+            retryHandler.removeCallbacksAndMessages(null)
+            retryScheduled = false
+            retryAttempt = 0
+        }
         stopDiscovery()
         stopScreenMirror(notifyMac = false)
         clearSocket()
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
-    private fun clearSocket() {
-        activeSocket?.let { runCatching { it.close() } }
-        activeSocket = null
-        activeWriter = null
-        activeKey = null
+    private fun clearSocket(expectedSocket: Socket? = null) {
+        synchronized(connectionLock) {
+            val session = activeSession
+            if (expectedSocket != null && session?.socket !== expectedSocket) return
+            heartbeatFuture?.cancel(false)
+            heartbeatFuture = null
+            session?.let { runCatching { it.socket.close() } }
+            activeSession = null
+        }
     }
 
     private fun createNotificationChannel() {

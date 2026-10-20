@@ -649,29 +649,14 @@ private final class MacLinkServer: @unchecked Sendable {
     private var paired = PairKeyStore.load()
     private var activeConnection: NWConnection?
     private var activeSessionKey: SymmetricKey?
+    private var listenerRestartTask: DispatchWorkItem?
+    private var listenerRestartDelay: TimeInterval = 1
     var onStatus: ((String, Bool) -> Void)?
     var onPaired: ((String) -> Void)?
     var onEvent: ((PhoneEvent) -> Void)?
 
     func start() {
-        do {
-            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
-            listener.service = NWListener.Service(name: "PhoneBridge-Mac", type: "_phonebridge._tcp")
-            listener.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready: self?.onStatus?("같은 Wi‑Fi에 있는 Android 휴대폰을 찾는 중", false)
-                case .failed(let error): self?.onStatus?("로컬 연결 오류: \(error.localizedDescription)", false)
-                default: break
-                }
-            }
-            listener.newConnectionHandler = { [weak self] connection in
-                self?.accept(connection)
-            }
-            self.listener = listener
-            listener.start(queue: queue)
-        } catch {
-            onStatus?("로컬 연결을 시작하지 못했습니다: \(error.localizedDescription)", false)
-        }
+        queue.async { self.startListener() }
     }
 
     func setPendingSecret(_ secret: Data, expiresAt: Date) {
@@ -737,9 +722,21 @@ private final class MacLinkServer: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection) {
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed(let error):
+                self.connectionEnded(connection, status: "휴대폰 연결이 끊겼습니다 · 다시 연결을 기다리는 중")
+                NSLog("PhoneBridge connection failed: %@", error.localizedDescription)
+            case .cancelled:
+                self.connectionEnded(connection, status: "휴대폰 연결이 끊겼습니다 · 다시 연결을 기다리는 중")
+            default:
+                break
+            }
+        }
         connection.start(queue: queue)
         let challenge = SecureRandom.bytes(count: 32)
-        guard let challengeText = challenge.base64EncodedString() as String? else { return }
+        let challengeText = challenge.base64EncodedString()
         send(["type": "challenge", "nonce": challengeText], over: connection)
         receiveLine(from: connection, buffer: Data()) { [weak self] data, remainder in
             guard let self, let data,
@@ -769,6 +766,9 @@ private final class MacLinkServer: @unchecked Sendable {
             }
             let responseProof = Self.hmac(key: key, text: "welcome|\(challengeText)|\(name)")
             self.send(["type": "welcome", "proof": responseProof.base64EncodedString()], over: connection)
+            if let previous = self.activeConnection, previous !== connection {
+                previous.cancel()
+            }
             self.activeConnection = connection
             let sessionKey = Self.sessionKey(secret: key, challenge: challenge)
             self.activeSessionKey = sessionKey
@@ -786,10 +786,7 @@ private final class MacLinkServer: @unchecked Sendable {
                   let nonceData = Data(base64Encoded: nonceText),
                   let combined = Data(base64Encoded: wrapper["ciphertext"] as? String ?? ""),
                   combined.count >= 16 else {
-                connection.cancel()
-                self?.activeConnection = nil
-                self?.activeSessionKey = nil
-                self?.onStatus?("Android 휴대폰 연결이 끊어졌습니다", false)
+                self?.connectionEnded(connection, status: "휴대폰 메시지를 읽지 못했습니다 · 다시 연결을 기다리는 중")
                 return
             }
             do {
@@ -797,15 +794,76 @@ private final class MacLinkServer: @unchecked Sendable {
                 let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: combined.dropLast(16), tag: combined.suffix(16))
                 let clear = try AES.GCM.open(box, using: key)
                 let event = try JSONDecoder().decode(PhoneEvent.self, from: clear)
-                DispatchQueue.main.async { self.onEvent?(event) }
+                if event.kind == "heartbeat_ping" {
+                    self.sendSecure(["kind": "heartbeat_pong", "timestamp": Date().timeIntervalSince1970])
+                } else {
+                    DispatchQueue.main.async { self.onEvent?(event) }
+                }
                 self.readSecureEvents(from: connection, buffer: remainder, key: key, deviceName: deviceName)
             } catch {
-                connection.cancel()
-                self.activeConnection = nil
-                self.activeSessionKey = nil
-                self.onStatus?("암호화된 메시지를 확인하지 못해 연결을 끊었습니다", false)
+                self.connectionEnded(connection, status: "암호화된 메시지를 확인하지 못했습니다 · 다시 연결을 기다리는 중")
             }
         }
+    }
+
+    private func connectionEnded(_ connection: NWConnection, status: String) {
+        connection.cancel()
+        guard activeConnection === connection else { return }
+        activeConnection = nil
+        activeSessionKey = nil
+        onStatus?(status, false)
+    }
+
+    private func startListener() {
+        guard listener == nil else { return }
+        do {
+            let listener = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: Self.port)!)
+            listener.service = NWListener.Service(name: "PhoneBridge-Mac", type: "_phonebridge._tcp")
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.listenerRestartDelay = 1
+                    self.listenerRestartTask?.cancel()
+                    self.listenerRestartTask = nil
+                    if self.activeConnection == nil {
+                        self.onStatus?("같은 Wi‑Fi에 있는 Android 휴대폰을 찾는 중", false)
+                    }
+                case .failed(let error):
+                    self.listener = nil
+                    if self.activeConnection == nil {
+                        self.onStatus?("로컬 연결을 복구하는 중…", false)
+                    }
+                    NSLog("PhoneBridge listener failed: %@", error.localizedDescription)
+                    self.scheduleListenerRestart()
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.accept(connection)
+            }
+            self.listener = listener
+            listener.start(queue: queue)
+        } catch {
+            listener = nil
+            onStatus?("로컬 연결을 복구하는 중…", false)
+            NSLog("PhoneBridge listener could not start: %@", error.localizedDescription)
+            scheduleListenerRestart()
+        }
+    }
+
+    private func scheduleListenerRestart() {
+        guard listenerRestartTask == nil else { return }
+        let delay = listenerRestartDelay
+        listenerRestartDelay = min(listenerRestartDelay * 2, 30)
+        let task = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.listenerRestartTask = nil
+            self.startListener()
+        }
+        listenerRestartTask = task
+        queue.asyncAfter(deadline: .now() + delay, execute: task)
     }
 
     private func receiveLine(from connection: NWConnection, buffer: Data, completion: @escaping (Data?, Data) -> Void) {
