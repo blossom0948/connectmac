@@ -17,6 +17,10 @@ Mac과 Android 휴대폰을 같은 로컬 Wi‑Fi에서 연결하는 앱입니�
 - Android의 활성 미디어 세션을 이전/재생/일시 정지/다음으로 제어
 - Mac 갤러리에서 Android 사진을 페이지별로 둘러보고 원본 받기. Android에서 허용한 사진만 표시
 - 사진과 파일 양방향 전송, Mac 파일 끌어놓기와 Android 시스템 공유 메뉴 전송, Mac에서 수신 파일 저장 위치 선택
+- Mac 파일 전송 대기열에서 휴대폰 저장 여부 확인, 실패 이유 표시와 재시도. 한 번에 하나씩 보내 수신이 겹치는 상황을 줄임
+- Mac 갤러리에서 여러 사진을 선택해 순서대로 내려받기. 이미 대기 중이거나 받는 중인 사진은 다시 추가하지 않음
+- Android에서 Mac으로 받은 파일을 전체·사진·파일로 분류하고 열기, 다른 앱 공유, 확인 후 삭제
+- 연결이 끊긴 뒤 남은 미완성 전송 조각을 정리하고, 반복 용량 계산을 줄여 큰 전송의 처리 부담을 낮춤
 - Mac에서 요청하면 연결된 Android 휴대폰에서 찾기 알림음 재생
 - Android 시스템 동의로 시작하는 화면 미리보기. 별도 접근성 권한을 켜면 Mac에서 탭·스와이프와 뒤로·홈·최근 앱 조작
 - 텍스트 클립보드 양방향 전송. Mac에서 전송하거나 Android 앱에서 보내기를 눌러야 하며, Mac은 수신 텍스트를 사용자가 눌러 복사
@@ -91,10 +95,10 @@ cd android
 Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.gradle.kts`에서 같은 값으로 올리고 Android `versionCode`도 증가시킨 뒤 다음 명령을 실행합니다.
 
 ```sh
-scripts/package-release.sh 0.3.4
+scripts/package-release.sh 0.3.5
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.4/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.4` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.5/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.5` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 

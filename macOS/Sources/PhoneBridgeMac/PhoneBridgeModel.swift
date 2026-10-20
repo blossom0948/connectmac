@@ -48,6 +48,33 @@ struct ReceivedFile: Identifiable {
     let receivedAt: Date
 }
 
+enum OutgoingTransferStatus: Equatable {
+    case queued
+    case preparing
+    case sending
+    case completed
+    case failed
+
+    var title: String {
+        switch self {
+        case .queued: "대기 중"
+        case .preparing: "준비 중"
+        case .sending: "전송 중"
+        case .completed: "휴대폰에 저장됨"
+        case .failed: "전송 실패"
+        }
+    }
+}
+
+struct OutgoingTransfer: Identifiable {
+    let id: String
+    let name: String
+    let sourceURL: URL
+    var size: Int64
+    var status: OutgoingTransferStatus
+    var detail: String
+}
+
 struct PhoneGalleryItem: Identifiable {
     let id: String
     let name: String
@@ -66,6 +93,7 @@ private struct IncomingTransfer {
     let name: String
     let contentType: String
     let count: Int
+    var receivedBytes = 0
     var chunks: [Int: Data] = [:]
 }
 
@@ -90,6 +118,7 @@ final class PhoneBridgeModel: ObservableObject {
     @Published var showUnpairConfirmation = false
     @Published var pairingExpiresAt: Date?
     @Published var receivedFiles: [ReceivedFile] = []
+    @Published var outgoingTransfers: [OutgoingTransfer] = []
     @Published var actionMessage: String?
     @Published var screenFrame: NSImage?
     @Published var phoneClipboardText: String?
@@ -98,10 +127,15 @@ final class PhoneBridgeModel: ObservableObject {
     @Published var galleryStatus = "휴대폰 사진 라이브러리를 불러오세요."
     @Published var galleryHasMore = false
     @Published var galleryIsLoading = false
+    @Published var galleryDownloadingAssetIDs: Set<String> = []
+    @Published var activeGalleryDownloadAssetID: String?
 
     private let server = MacLinkServer()
     private var incomingTransfers: [String: IncomingTransfer] = [:]
-    private var galleryDownloads = Set<String>()
+    private var galleryDownloadQueue: [PhoneGalleryItem] = []
+    private var activeGalleryDownload: (transferID: String, item: PhoneGalleryItem)?
+    private var galleryTransferToAsset: [String: String] = [:]
+    private var activeOutgoingTransferID: String?
 
     init() {
         let paired = PairKeyStore.load()
@@ -115,7 +149,21 @@ final class PhoneBridgeModel: ObservableObject {
                 if !connected {
                     self?.screenFrame = nil
                     self?.galleryIsLoading = false
-                    self?.galleryDownloads.removeAll()
+                    self?.incomingTransfers.removeAll()
+                    if let active = self?.activeGalleryDownload {
+                        self?.galleryDownloadQueue.insert(active.item, at: 0)
+                        self?.activeGalleryDownload = nil
+                        self?.activeGalleryDownloadAssetID = nil
+                        self?.galleryTransferToAsset.removeAll()
+                        self?.galleryStatus = "연결이 끊겨 사진 전송을 대기 중입니다. 다시 연결되면 이어집니다."
+                    }
+                    if let transferID = self?.activeOutgoingTransferID {
+                        self?.updateOutgoingTransfer(transferID, status: .failed, detail: "연결이 끊겨 완료 여부를 확인하지 못했습니다.")
+                        self?.activeOutgoingTransferID = nil
+                    }
+                } else {
+                    self?.startNextGalleryDownload()
+                    self?.startNextOutgoingTransfer()
                 }
             }
         }
@@ -138,6 +186,8 @@ final class PhoneBridgeModel: ObservableObject {
     }
 
     func createPairingCode() {
+        pairingImage = nil
+        pairingError = nil
         let secret = SecureRandom.bytes(count: 32)
         let expiry = Date().addingTimeInterval(300)
         server.setPendingSecret(secret, expiresAt: expiry)
@@ -179,6 +229,13 @@ final class PhoneBridgeModel: ObservableObject {
         events.removeAll()
         galleryItems.removeAll()
         galleryHasMore = false
+        galleryDownloadQueue.removeAll()
+        activeGalleryDownload = nil
+        activeGalleryDownloadAssetID = nil
+        galleryTransferToAsset.removeAll()
+        galleryDownloadingAssetIDs.removeAll()
+        outgoingTransfers.removeAll()
+        activeOutgoingTransferID = nil
         createPairingCode()
         status = "Android 앱에서 QR 코드를 스캔하세요"
     }
@@ -186,11 +243,20 @@ final class PhoneBridgeModel: ObservableObject {
     func selectSection(_ section: String) {
         guard selectedSection != section else { return }
         selectedSection = section
-        server.checkConnection()
     }
 
     func requestMacNotifications() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+            Task { @MainActor in
+                if let error {
+                    self?.actionMessage = "Mac 알림 권한을 요청하지 못했습니다: \(error.localizedDescription)"
+                } else if !granted {
+                    self?.actionMessage = "Mac 시스템 설정에서 PhoneBridge 알림을 허용하면 알림 배너를 볼 수 있습니다."
+                } else {
+                    self?.actionMessage = "PhoneBridge 알림을 켰습니다."
+                }
+            }
+        }
     }
 
     func sendReply(to event: PhoneEvent, text: String) {
@@ -304,16 +370,47 @@ final class PhoneBridgeModel: ObservableObject {
     }
 
     func downloadGalleryItem(_ item: PhoneGalleryItem) {
+        downloadGalleryItems([item])
+    }
+
+    func downloadGalleryItems(_ items: [PhoneGalleryItem]) {
         guard isConnected else { galleryStatus = "사진을 받으려면 휴대폰을 연결하세요."; return }
-        guard !galleryDownloads.contains(item.id) else { return }
+        var added = 0
+        for item in items where galleryDownloadingAssetIDs.insert(item.id).inserted {
+            galleryDownloadQueue.append(item)
+            added += 1
+        }
+        guard added > 0 else {
+            galleryStatus = "선택한 사진은 이미 전송 중이거나 대기 중입니다."
+            return
+        }
+        galleryStatus = added == 1 ? "사진 전송을 시작합니다…" : "사진 \(added)개를 순서대로 받습니다."
+        startNextGalleryDownload()
+    }
+
+    private func startNextGalleryDownload() {
+        guard isConnected, activeGalleryDownload == nil, !galleryDownloadQueue.isEmpty else { return }
+        let item = galleryDownloadQueue.removeFirst()
         let transferId = UUID().uuidString
-        galleryDownloads.insert(transferId)
+        activeGalleryDownload = (transferId, item)
+        activeGalleryDownloadAssetID = item.id
+        galleryTransferToAsset[transferId] = item.id
         galleryStatus = "\(item.name)을(를) 휴대폰에서 받는 중…"
         server.sendSecure([
             "kind": "gallery_fetch",
             "assetId": item.id,
             "transferId": transferId,
         ])
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(300))
+            guard let self, self.activeGalleryDownload?.transferID == transferId else { return }
+            self.activeGalleryDownload = nil
+            self.activeGalleryDownloadAssetID = nil
+            self.galleryTransferToAsset.removeValue(forKey: transferId)
+            self.galleryDownloadingAssetIDs.remove(item.id)
+            self.galleryStatus = "사진 응답 시간이 초과되었습니다. 연결을 확인한 뒤 다시 시도하세요."
+            self.startNextGalleryDownload()
+        }
     }
 
     func sendMacClipboardToPhone() {
@@ -353,40 +450,81 @@ final class PhoneBridgeModel: ObservableObject {
 
     func sendFiles(_ urls: [URL]) {
         guard isConnected else { actionMessage = "전송하려면 휴대폰을 연결하세요."; return }
-        actionMessage = "선택한 파일을 준비하고 있습니다."
-        let linkServer = server
+        let newTransfers = urls.map { url in
+            OutgoingTransfer(id: UUID().uuidString, name: url.lastPathComponent, sourceURL: url,
+                size: 0, status: .queued, detail: "전송 차례를 기다립니다.")
+        }
+        outgoingTransfers.insert(contentsOf: newTransfers, at: 0)
+        actionMessage = "파일 \(newTransfers.count)개를 전송 대기열에 추가했습니다."
+        startNextOutgoingTransfer()
+    }
+
+    func retryFileTransfer(_ id: String) {
+        guard let transfer = outgoingTransfers.first(where: { $0.id == id }), transfer.status == .failed else { return }
+        sendFiles([transfer.sourceURL])
+    }
+
+    private func startNextOutgoingTransfer() {
+        guard isConnected, activeOutgoingTransferID == nil,
+              let index = outgoingTransfers.firstIndex(where: { $0.status == .queued }) else { return }
+        let transfer = outgoingTransfers[index]
+        activeOutgoingTransferID = transfer.id
+        updateOutgoingTransfer(transfer.id, status: .preparing, detail: "파일을 확인하고 있습니다.")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var sentNames: [String] = []
-            var failures: [String] = []
-            for url in urls {
-                do {
-                    let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-                    guard fileSize <= 100 * 1_024 * 1_024 else {
-                        failures.append("\(url.lastPathComponent): 100MB 초과")
-                        continue
+            let hasScopedAccess = transfer.sourceURL.startAccessingSecurityScopedResource()
+            defer { if hasScopedAccess { transfer.sourceURL.stopAccessingSecurityScopedResource() } }
+            do {
+                let fileSize = try transfer.sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                guard fileSize <= 100 * 1_024 * 1_024 else { throw TransferError.fileTooLarge }
+                let data = try Data(contentsOf: transfer.sourceURL, options: .mappedIfSafe)
+                guard data.count <= 100 * 1_024 * 1_024 else { throw TransferError.fileTooLarge }
+                DispatchQueue.main.async {
+                    guard let self, self.activeOutgoingTransferID == transfer.id else { return }
+                    guard self.isConnected else {
+                        self.updateOutgoingTransfer(transfer.id, status: .failed, detail: "휴대폰 연결이 끊겼습니다. 다시 시도할 수 있습니다.")
+                        self.activeOutgoingTransferID = nil
+                        return
                     }
-                    let data = try Data(contentsOf: url, options: .mappedIfSafe)
-                    guard data.count <= 100 * 1_024 * 1_024 else {
-                        failures.append("\(url.lastPathComponent): 100MB 초과")
-                        continue
-                    }
-                    linkServer.sendFile(
-                        name: url.lastPathComponent,
-                        contentType: UTType(filenameExtension: url.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                    self.updateOutgoingTransfer(transfer.id, status: .sending, size: Int64(data.count), detail: "휴대폰 저장을 기다리는 중입니다.")
+                    self.server.sendFile(
+                        name: transfer.name,
+                        contentType: UTType(filenameExtension: transfer.sourceURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
                         data: data,
+                        transferId: transfer.id,
                     )
-                    sentNames.append(url.lastPathComponent)
-                } catch {
-                    failures.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(300))
+                        guard let self, self.activeOutgoingTransferID == transfer.id else { return }
+                        self.updateOutgoingTransfer(transfer.id, status: .failed, detail: "휴대폰 응답이 없습니다. 연결을 확인하고 다시 시도하세요.")
+                        self.activeOutgoingTransferID = nil
+                        self.startNextOutgoingTransfer()
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.updateOutgoingTransfer(transfer.id, status: .failed, detail: error.localizedDescription)
+                    if self.activeOutgoingTransferID == transfer.id { self.activeOutgoingTransferID = nil }
+                    self.startNextOutgoingTransfer()
                 }
             }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if !failures.isEmpty {
-                    self.actionMessage = "전송 시작 \(sentNames.count)개 · 실패 \(failures.joined(separator: ", "))"
-                } else if !sentNames.isEmpty {
-                    self.actionMessage = "\(sentNames.count)개 파일을 휴대폰으로 보내고 있습니다."
-                }
+        }
+    }
+
+    private func updateOutgoingTransfer(_ id: String, status: OutgoingTransferStatus, size: Int64? = nil, detail: String) {
+        guard let index = outgoingTransfers.firstIndex(where: { $0.id == id }) else { return }
+        outgoingTransfers[index].status = status
+        outgoingTransfers[index].detail = detail
+        if let size { outgoingTransfers[index].size = size }
+        var keptHistory = 0
+        outgoingTransfers = outgoingTransfers.filter { transfer in
+            switch transfer.status {
+            case .queued, .preparing, .sending:
+                return true
+            case .completed, .failed:
+                guard keptHistory < 30 else { return false }
+                keptHistory += 1
+                return true
             }
         }
     }
@@ -411,7 +549,12 @@ final class PhoneBridgeModel: ObservableObject {
         panel.allowedContentTypes = [.json]
         guard panel.runModal() == .OK, let url = panel.url,
               let data = try? JSONEncoder().encode(events) else { return }
-        try? data.write(to: url, options: .atomic)
+        do {
+            try data.write(to: url, options: .atomic)
+            actionMessage = "최근 활동을 JSON 파일로 내보냈습니다."
+        } catch {
+            actionMessage = "최근 활동을 내보내지 못했습니다: \(error.localizedDescription)"
+        }
     }
 
     private func receive(_ event: PhoneEvent) {
@@ -444,7 +587,16 @@ final class PhoneBridgeModel: ObservableObject {
         }
         if event.kind == "gallery_download_result" {
             galleryStatus = event.text ?? "사진 전송 상태를 확인하세요."
-            if event.success != true, let transferId = event.eventId { galleryDownloads.remove(transferId) }
+            if event.success != true, let transferId = event.eventId {
+                if let assetId = galleryTransferToAsset.removeValue(forKey: transferId) {
+                    galleryDownloadingAssetIDs.remove(assetId)
+                }
+                if activeGalleryDownload?.transferID == transferId {
+                    activeGalleryDownload = nil
+                    activeGalleryDownloadAssetID = nil
+                }
+                startNextGalleryDownload()
+            }
             return
         }
         if event.kind == "remote_control_result" {
@@ -473,7 +625,20 @@ final class PhoneBridgeModel: ObservableObject {
             return
         }
         if event.kind == "file_received" {
-            actionMessage = "Android 휴대폰에 \(event.title ?? "파일")을(를) 저장했습니다."
+            guard let transferID = event.eventId ?? activeOutgoingTransferID,
+                  outgoingTransfers.contains(where: { $0.id == transferID }) else {
+                actionMessage = event.success == false ? (event.text ?? "휴대폰에 파일을 저장하지 못했습니다.") : "Android 휴대폰에 \(event.title ?? "파일")을(를) 저장했습니다."
+                return
+            }
+            if event.success != false {
+                updateOutgoingTransfer(transferID, status: .completed, detail: "휴대폰에 안전하게 저장했습니다.")
+                actionMessage = "Android 휴대폰에 \(event.title ?? "파일")을(를) 저장했습니다."
+            } else {
+                updateOutgoingTransfer(transferID, status: .failed, detail: event.text ?? "휴대폰에 저장하지 못했습니다.")
+                actionMessage = event.text ?? "휴대폰에 파일을 저장하지 못했습니다."
+            }
+            if activeOutgoingTransferID == transferID { activeOutgoingTransferID = nil }
+            startNextOutgoingTransfer()
             return
         }
         if event.kind == "dismiss_notification_result" {
@@ -515,14 +680,13 @@ final class PhoneBridgeModel: ObservableObject {
         )
         if incomingTransfers[transferId] == nil && incomingTransfers.count >= 4 { return }
         guard transfer.count == count else { incomingTransfers.removeValue(forKey: transferId); return }
-        transfer.chunks[index] = chunk
-        guard transfer.chunks.values.reduce(0, { $0 + $1.count }) <= 100 * 1_024 * 1_024 else {
+        let previousChunk = transfer.chunks.updateValue(chunk, forKey: index)
+        transfer.receivedBytes += chunk.count - (previousChunk?.count ?? 0)
+        guard transfer.receivedBytes <= 100 * 1_024 * 1_024 else {
             incomingTransfers.removeValue(forKey: transferId)
             return
         }
-        let totalPending = incomingTransfers.filter { $0.key != transferId }.values.reduce(0) { total, current in
-            total + current.chunks.values.reduce(0) { $0 + $1.count }
-        } + transfer.chunks.values.reduce(0) { $0 + $1.count }
+        let totalPending = incomingTransfers.filter { $0.key != transferId }.values.reduce(0) { $0 + $1.receivedBytes } + transfer.receivedBytes
         guard totalPending <= 128 * 1_024 * 1_024 else {
             incomingTransfers.removeValue(forKey: transferId)
             return
@@ -541,8 +705,12 @@ final class PhoneBridgeModel: ObservableObject {
         }
         incomingTransfers.removeValue(forKey: transferId)
         actionMessage = "휴대폰에서 \(transfer.name)을(를) 받았습니다."
-        if galleryDownloads.remove(transferId) != nil {
+        if let assetId = galleryTransferToAsset.removeValue(forKey: transferId) {
+            galleryDownloadingAssetIDs.remove(assetId)
+            if activeGalleryDownload?.transferID == transferId { activeGalleryDownload = nil }
+            if activeGalleryDownloadAssetID == assetId { activeGalleryDownloadAssetID = nil }
             galleryStatus = "사진을 받았습니다. 받은 항목에서 저장할 수 있습니다."
+            startNextGalleryDownload()
         }
     }
 
@@ -553,6 +721,16 @@ final class PhoneBridgeModel: ObservableObject {
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+private enum TransferError: LocalizedError {
+    case fileTooLarge
+
+    var errorDescription: String? {
+        switch self {
+        case .fileTooLarge: "파일은 100MB 이하만 전송할 수 있습니다."
+        }
     }
 }
 
@@ -655,8 +833,6 @@ private final class MacLinkServer: @unchecked Sendable {
     private var paired = PairKeyStore.load()
     private var activeConnection: NWConnection?
     private var activeSessionKey: SymmetricKey?
-    private var inboundMessageSequence: UInt64 = 0
-    private var activePeerSupportsProbes = false
     private var listenerRestartTask: DispatchWorkItem?
     private var listenerRestartDelay: TimeInterval = 1
     var onStatus: ((String, Bool) -> Void)?
@@ -682,7 +858,6 @@ private final class MacLinkServer: @unchecked Sendable {
             self.activeConnection?.cancel()
             self.activeConnection = nil
             self.activeSessionKey = nil
-            self.activePeerSupportsProbes = false
         }
     }
 
@@ -702,24 +877,8 @@ private final class MacLinkServer: @unchecked Sendable {
         }
     }
 
-    func checkConnection() {
-        queue.async { [weak self] in
-            guard let self else { return }
-            guard self.activePeerSupportsProbes, let connection = self.activeConnection else { return }
-            let sequenceAtPing = self.inboundMessageSequence
-            self.sendSecure(["kind": "heartbeat_ping", "timestamp": Date().timeIntervalSince1970])
-            self.queue.asyncAfter(deadline: .now() + .seconds(8)) { [weak self, weak connection] in
-                guard let self, let connection,
-                      self.activeConnection === connection,
-                      self.inboundMessageSequence == sequenceAtPing else { return }
-                self.connectionEnded(connection, status: "휴대폰 응답이 없어 다시 연결을 기다리는 중")
-            }
-        }
-    }
-
-    func sendFile(name: String, contentType: String, data: Data) {
+    func sendFile(name: String, contentType: String, data: Data, transferId: String) {
         guard data.count <= 100 * 1_024 * 1_024 else { return }
-        let transferId = UUID().uuidString
         let chunkSize = 24 * 1_024
         let count = max(1, Int(ceil(Double(data.count) / Double(chunkSize))))
         for index in 0..<count {
@@ -800,7 +959,6 @@ private final class MacLinkServer: @unchecked Sendable {
             self.activeConnection = connection
             let sessionKey = Self.sessionKey(secret: key, challenge: challenge)
             self.activeSessionKey = sessionKey
-            self.activePeerSupportsProbes = (object["capabilities"] as? [String])?.contains("peer-probe-v1") == true
             self.onStatus?("\(name) 연결됨", true)
             self.readSecureEvents(from: connection, buffer: remainder, key: sessionKey, deviceName: name)
         }
@@ -823,7 +981,6 @@ private final class MacLinkServer: @unchecked Sendable {
                 let box = try AES.GCM.SealedBox(nonce: nonce, ciphertext: combined.dropLast(16), tag: combined.suffix(16))
                 let clear = try AES.GCM.open(box, using: key)
                 let event = try JSONDecoder().decode(PhoneEvent.self, from: clear)
-                self.inboundMessageSequence &+= 1
                 if event.kind == "heartbeat_ping" {
                     self.sendSecure(["kind": "heartbeat_pong", "timestamp": Date().timeIntervalSince1970])
                 } else if event.kind != "heartbeat_pong" {
@@ -841,7 +998,6 @@ private final class MacLinkServer: @unchecked Sendable {
         guard activeConnection === connection else { return }
         activeConnection = nil
         activeSessionKey = nil
-        activePeerSupportsProbes = false
         onStatus?(status, false)
     }
 

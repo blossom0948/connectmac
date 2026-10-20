@@ -44,13 +44,16 @@ import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.PhoneInTalk
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.RestartAlt
+import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material.icons.automirrored.outlined.ScreenShare
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -102,6 +105,8 @@ fun PhoneBridgeApp(
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
     onOpenReceivedFile: (ReceivedFileItem) -> Unit,
+    onShareReceivedFile: (ReceivedFileItem) -> Unit,
+    onDeleteReceivedFile: (ReceivedFileItem) -> Unit,
     onStartScreenShare: () -> Unit,
     onStopScreenShare: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
@@ -167,6 +172,8 @@ fun PhoneBridgeApp(
                     onPickFile = onPickFile,
                     onSendClipboard = onSendClipboard,
                     onOpenReceivedFile = onOpenReceivedFile,
+                    onShareReceivedFile = onShareReceivedFile,
+                    onDeleteReceivedFile = onDeleteReceivedFile,
                 )
                 PhoneBridgeTab.Settings -> SettingsTab(
                     updateState = updateState,
@@ -350,7 +357,18 @@ private fun TransferTab(
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
     onOpenReceivedFile: (ReceivedFileItem) -> Unit,
+    onShareReceivedFile: (ReceivedFileItem) -> Unit,
+    onDeleteReceivedFile: (ReceivedFileItem) -> Unit,
 ) {
+    var selectedFilter by rememberSaveable { mutableStateOf("모두") }
+    var pendingDelete by remember { mutableStateOf<ReceivedFileItem?>(null) }
+    val visibleFiles = receivedFiles.filter { item ->
+        when (selectedFilter) {
+            "사진" -> item.contentType.startsWith("image/")
+            "파일" -> !item.contentType.startsWith("image/")
+            else -> true
+        }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
@@ -404,34 +422,80 @@ private fun TransferTab(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Mac에서 받은 파일", fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
-                Text("${receivedFiles.size}개", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("${visibleFiles.size}개", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        if (receivedFiles.isEmpty()) {
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("모두", "사진", "파일").forEach { filter ->
+                    FilterChip(
+                        selected = selectedFilter == filter,
+                        onClick = { selectedFilter = filter },
+                        label = { Text(filter, fontSize = 14.sp) },
+                    )
+                }
+            }
+        }
+        if (visibleFiles.isEmpty()) {
             item {
-                EmptyTransferCard()
+                if (receivedFiles.isEmpty()) EmptyTransferCard()
+                else Text("이 분류에 받은 항목이 없습니다.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp))
             }
         } else {
-            items(receivedFiles.take(20), key = { it.path }) { item ->
+            items(visibleFiles.take(20), key = { it.path }) { item ->
                 PhoneBridgeSurface(Modifier.fillMaxWidth()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(11.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
-                        Icon(Icons.Outlined.FolderOpen, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                        Surface(
+                            modifier = Modifier.size(40.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    if (item.contentType.startsWith("image/")) Icons.Outlined.PhotoLibrary else Icons.Outlined.FolderOpen,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(21.dp),
+                                )
+                            }
+                        }
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(item.name, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(android.text.format.Formatter.formatFileSize(androidx.compose.ui.platform.LocalContext.current, item.size), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
+                        IconButton(onClick = { onShareReceivedFile(item) }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Outlined.Share, contentDescription = "다른 앱으로 공유", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         TextButton(onClick = { onOpenReceivedFile(item) }) { Text("열기", fontSize = 14.sp) }
+                        IconButton(onClick = { pendingDelete = item }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Outlined.DeleteOutline, contentDescription = "받은 파일 삭제", tint = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }
-            if (receivedFiles.size > 20) {
+            if (visibleFiles.size > 20) {
                 item { Text("최근 20개를 표시하고 있습니다.", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
+    }
+
+    pendingDelete?.let { item ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("받은 파일을 삭제할까요?") },
+            text = { Text("${item.name}을(를) PhoneBridge 저장 공간에서 삭제합니다.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    onDeleteReceivedFile(item)
+                }) { Text("삭제", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("취소") } },
+        )
     }
 }
 

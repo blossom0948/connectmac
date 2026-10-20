@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.phonebridge.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3004
-        versionName = "0.3.4"
+        versionCode = 3005
+        versionName = "0.3.5"
     }
 
     buildFeatures {

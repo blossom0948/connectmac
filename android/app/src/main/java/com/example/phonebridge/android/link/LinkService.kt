@@ -81,6 +81,7 @@ class LinkService : Service() {
         private const val HEARTBEAT_TIMEOUT_MS = 90_000L
         private const val CONNECTION_PROBE_TIMEOUT_MS = 8_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
+        private val fileTransferLock = Any()
         private val heartbeatScheduler = Executors.newSingleThreadScheduledExecutor()
         private val connectionLock = Any()
         private data class ActiveSession(
@@ -122,11 +123,13 @@ class LinkService : Service() {
 
         fun sendFile(context: Context, name: String, contentType: String, bytes: ByteArray, transferId: String? = null): Boolean {
             if (bytes.size > 100 * 1024 * 1024 || !isConnected()) return false
-            executor.execute {
+            return synchronized(fileTransferLock) {
+                if (!isConnected()) return@synchronized false
                 val currentTransferId = transferId ?: java.util.UUID.randomUUID().toString()
                 val chunkSize = 24 * 1024
                 val count = maxOf(1, (bytes.size + chunkSize - 1) / chunkSize)
                 for (index in 0 until count) {
+                    if (!isConnected()) return@synchronized false
                     val start = index * chunkSize
                     val end = minOf(start + chunkSize, bytes.size)
                     sendEvent(context, JSONObject()
@@ -138,8 +141,8 @@ class LinkService : Service() {
                         .put("transferCount", count)
                         .put("payload", Base64.encodeToString(bytes.copyOfRange(start, end), Base64.NO_WRAP)))
                 }
+                true
             }
-            return true
         }
 
         fun sendClipboardText(context: Context, text: String): Boolean {
@@ -169,7 +172,14 @@ class LinkService : Service() {
     private var imageReader: ImageReader? = null
     private var imageThread: HandlerThread? = null
     private var lastScreenFrameAt = 0L
-    private data class IncomingTransfer(val name: String, val contentType: String, val count: Int, val chunks: MutableMap<Int, ByteArray> = mutableMapOf())
+    private data class IncomingTransfer(
+        val name: String,
+        val contentType: String,
+        val count: Int,
+        var lastActivityAt: Long = SystemClock.elapsedRealtime(),
+        val chunks: MutableMap<Int, ByteArray> = mutableMapOf(),
+        var receivedBytes: Int = 0,
+    )
     private val incomingTransfers = mutableMapOf<String, IncomingTransfer>()
 
     override fun onCreate() {
@@ -633,41 +643,63 @@ class LinkService : Service() {
     }
 
     private fun receiveFileChunk(chunk: JSONObject) {
-        val transferId = chunk.optString("eventId")
-        val index = chunk.optInt("transferIndex", -1)
-        val count = chunk.optInt("transferCount", -1)
-        if (transferId.isBlank() || count !in 1..5000 || index !in 0 until count) return
-        val data = runCatching { Base64.decode(chunk.getString("payload"), Base64.DEFAULT) }.getOrNull() ?: return
-        if (data.size > 24 * 1024 || (transferId !in incomingTransfers && incomingTransfers.size >= 4)) return
-        val transfer = incomingTransfers.getOrPut(transferId) {
-            IncomingTransfer(chunk.optString("title", "PhoneBridge-file"), chunk.optString("source", "application/octet-stream"), count)
-        }
-        if (transfer.count != count) {
+        synchronized(incomingTransfers) {
+            val transferId = chunk.optString("eventId")
+            val index = chunk.optInt("transferIndex", -1)
+            val count = chunk.optInt("transferCount", -1)
+            if (transferId.isBlank() || count !in 1..5000 || index !in 0 until count) return
+            val data = runCatching { Base64.decode(chunk.getString("payload"), Base64.DEFAULT) }.getOrNull() ?: return
+            val now = SystemClock.elapsedRealtime()
+            incomingTransfers.entries.removeAll { now - it.value.lastActivityAt > TimeUnit.MINUTES.toMillis(3) }
+            if (data.size > 24 * 1024 || (transferId !in incomingTransfers && incomingTransfers.size >= 4)) return
+            val transfer = incomingTransfers.getOrPut(transferId) {
+                IncomingTransfer(chunk.optString("title", "PhoneBridge-file"), chunk.optString("source", "application/octet-stream"), count)
+            }
+            if (transfer.count != count) {
+                incomingTransfers.remove(transferId)
+                return
+            }
+            transfer.lastActivityAt = now
+            val previousChunk = transfer.chunks.put(index, data)
+            transfer.receivedBytes += data.size - (previousChunk?.size ?: 0)
+            val transferBytes = transfer.receivedBytes
+            val totalPendingBytes = incomingTransfers.filterKeys { it != transferId }
+                .values.sumOf { pending -> pending.receivedBytes } + transferBytes
+            if (transferBytes > 100 * 1024 * 1024 || totalPendingBytes > 128 * 1024 * 1024) {
+                incomingTransfers.remove(transferId)
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", transferId)
+                    .put("success", false).put("text", "전송 용량 제한을 초과했습니다."))
+                return
+            }
+            if (transfer.chunks.size != count) return
+            val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            directory.mkdirs()
+            val safeName = File(transfer.name).name.ifBlank { "PhoneBridge-file" }
+            val outputFile = File(directory, "${System.currentTimeMillis()}-${java.util.UUID.randomUUID()}-$safeName")
+            val temporaryFile = runCatching { File.createTempFile("phonebridge-", ".part", directory) }.getOrNull()
+            if (temporaryFile == null) {
+                incomingTransfers.remove(transferId)
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", transferId)
+                    .put("success", false).put("text", "임시 파일을 만들지 못했습니다."))
+                return
+            }
+            runCatching {
+                temporaryFile.outputStream().buffered().use { output ->
+                    for (part in 0 until count) output.write(transfer.chunks[part] ?: error("파일 조각이 누락되었습니다."))
+                }
+                check(temporaryFile.renameTo(outputFile)) { "파일을 저장 위치로 옮기지 못했습니다." }
+                val received = ReceivedFileItem(outputFile.name, outputFile.absolutePath, transfer.contentType, outputFile.length())
+                ConnectionState.receivedFiles.value = listOf(received) + ConnectionState.receivedFiles.value.filterNot { it.path == received.path }
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", transferId)
+                    .put("title", outputFile.name).put("success", true).put("size", outputFile.length()))
+            }.onFailure {
+                temporaryFile.delete()
+                outputFile.delete()
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", transferId)
+                    .put("success", false).put("text", "파일을 저장하지 못했습니다: ${it.localizedMessage ?: "저장 공간이나 접근 권한을 확인하세요."}"))
+            }
             incomingTransfers.remove(transferId)
-            return
         }
-        transfer.chunks[index] = data
-        val transferBytes = transfer.chunks.values.sumOf { it.size }
-        val totalPendingBytes = incomingTransfers.filterKeys { it != transferId }
-            .values.sumOf { pending -> pending.chunks.values.sumOf { it.size } } + transferBytes
-        if (transferBytes > 100 * 1024 * 1024 || totalPendingBytes > 128 * 1024 * 1024) {
-            incomingTransfers.remove(transferId)
-            return
-        }
-        if (transfer.chunks.size != count) return
-        val output = ByteArrayOutputStream()
-        for (part in 0 until count) output.write(transfer.chunks[part] ?: return)
-        val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
-        directory.mkdirs()
-        val safeName = File(transfer.name).name.ifBlank { "PhoneBridge-file" }
-        val outputFile = File(directory, "${System.currentTimeMillis()}-$safeName")
-        runCatching {
-            outputFile.writeBytes(output.toByteArray())
-            val received = ReceivedFileItem(outputFile.name, outputFile.absolutePath, transfer.contentType, outputFile.length())
-            ConnectionState.receivedFiles.value = listOf(received) + ConnectionState.receivedFiles.value.filterNot { it.path == received.path }
-            sendEvent(this, JSONObject().put("kind", "file_received").put("title", outputFile.name))
-        }
-        incomingTransfers.remove(transferId)
     }
 
     private fun startDiscovery(secret: ByteArray) {
@@ -783,6 +815,7 @@ class LinkService : Service() {
             heartbeatFuture = null
             session?.let { runCatching { it.socket.close() } }
             activeSession = null
+            synchronized(incomingTransfers) { incomingTransfers.clear() }
         }
     }
 

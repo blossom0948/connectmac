@@ -83,9 +83,29 @@ fun PhoneBridgeGlassPanel(
     val shape = RoundedCornerShape(28.dp)
     Box(
         modifier = modifier
+            .shadow(
+                elevation = 16.dp,
+                shape = shape,
+                ambientColor = scheme.primary.copy(alpha = 0.08f),
+                spotColor = Color.Black.copy(alpha = if (dark) 0.34f else 0.12f),
+            )
             .clip(shape)
-            .background(scheme.surface.copy(alpha = if (dark) 0.78f else 0.78f))
-            .border(1.dp, scheme.onSurface.copy(alpha = if (dark) 0.08f else 0.07f), shape),
+            .background(
+                Brush.verticalGradient(
+                    if (dark) listOf(
+                        Color.White.copy(alpha = 0.11f),
+                        scheme.surface.copy(alpha = 0.82f),
+                        scheme.surface.copy(alpha = 0.74f),
+                    ) else listOf(
+                        Color.White.copy(alpha = 0.94f),
+                        Color.White.copy(alpha = 0.83f),
+                        Color(0xFFE9F0FF).copy(alpha = 0.82f),
+                    ),
+                ),
+                shape,
+            )
+            .border(1.dp, Color.White.copy(alpha = if (dark) 0.18f else 0.76f), shape)
+            .border(1.dp, scheme.onSurface.copy(alpha = if (dark) 0.07f else 0.035f), shape),
         content = content,
     )
 }
@@ -100,9 +120,15 @@ fun PhoneBridgeSurface(
     val shape = RoundedCornerShape(22.dp)
     Box(
         modifier = modifier
+            .shadow(
+                elevation = 8.dp,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = if (dark) 0.20f else 0.035f),
+                spotColor = Color.Black.copy(alpha = if (dark) 0.24f else 0.065f),
+            )
             .clip(shape)
-            .background(scheme.surface.copy(alpha = 0.78f))
-            .border(1.dp, scheme.onSurface.copy(alpha = if (dark) 0.08f else 0.07f), shape),
+            .background(scheme.surface.copy(alpha = if (dark) 0.96f else 0.94f))
+            .border(1.dp, scheme.onSurface.copy(alpha = if (dark) 0.09f else 0.055f), shape),
         content = content,
     )
 }

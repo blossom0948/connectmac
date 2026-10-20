@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: scripts/package-release.sh <version> (for example 0.3.4)" >&2
+  echo "Usage: scripts/package-release.sh <version> (for example 0.3.5)" >&2
   exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,7 +79,7 @@ cat > "$RELEASE_DIR/phonebridge-update.json" <<EOF
   "versionCode": $VERSION_CODE,
   "apkUrl": "${DOWNLOAD_PREFIX}PhoneBridge-android.apk",
   "sha256": "$APK_SHA256",
-  "notes": "Mac과 Android의 탭을 이동할 때 암호화된 연결 확인 신호를 보내고, 응답이 없으면 로컬 Wi-Fi 검색으로 다시 연결합니다. 앱 화면 복귀 시에도 연결 서비스를 확인합니다."
+  "notes": "사진 여러 장을 차례로 안전하게 받고, Mac에서 Android로 보내는 파일은 저장 확인과 재시도 상태를 표시합니다. Android에서 받은 파일을 다른 앱으로 공유하거나 삭제할 수 있고, 중단된 파일 조각은 연결이 끊길 때 정리합니다."
 }
 EOF
 
@@ -105,9 +105,10 @@ cp "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$SPARKLE_STAGE/PhoneBridge-macOS.dmg"
 cat > "$SPARKLE_STAGE/PhoneBridge-macOS.md" <<EOF
 PhoneBridge $VERSION
 
-- Mac과 Android에서 기능 화면을 바꿀 때 암호화된 연결 확인 신호를 보내 연결이 살아 있는지 검사합니다.
-- 응답이 없는 연결은 닫고 로컬 Wi-Fi 검색으로 자동 재연결합니다.
-- Android 앱이 다시 열릴 때 연결 서비스 상태를 확인하고 중단된 연결을 복구합니다.
+- Mac에서 Android로 보내는 파일을 한 개씩 처리하고 휴대폰 저장 완료를 확인합니다. 연결 오류나 저장 실패를 표시하고 재시도할 수 있습니다.
+- 갤러리에서 여러 사진을 선택해 순서대로 받을 수 있으며, 이미 받는 중인 사진을 중복 요청하지 않습니다.
+- Android에서 받은 파일을 전체·사진·파일로 분류하고 열기, 다른 앱으로 공유, 확인 후 삭제할 수 있습니다.
+- 끊긴 연결의 불완전한 파일 조각을 정리하고, 큰 전송의 누적 용량 계산을 효율적으로 처리합니다.
 - 기존 Android 설치와 macOS 앱을 자동 업데이트할 수 있도록 동일 서명 APK와 Sparkle DMG를 함께 제공합니다.
 EOF
 "$SPARKLE_BIN/generate_appcast" --download-url-prefix "$DOWNLOAD_PREFIX" --embed-release-notes "$SPARKLE_STAGE"

@@ -80,6 +80,8 @@ class MainActivity : ComponentActivity() {
     private var systemBarPadding by mutableStateOf(PaddingValues(0.dp))
     private var galleryAccessGranted by mutableStateOf(false)
     private var remoteControlEnabled by mutableStateOf(false)
+    private var notificationAccessGranted by mutableStateOf(false)
+    private var phonePermissionGranted by mutableStateOf(false)
     private val updateManager by lazy { PhoneBridgeUpdateManager(this) }
     private val transferExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val updateCheckHandler = Handler(Looper.getMainLooper())
@@ -134,6 +136,7 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val callPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        phonePermissionGranted = granted
         if (granted && PairingStore.load(this) != null) startLink()
     }
     private val galleryPermission = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -162,6 +165,8 @@ class MainActivity : ComponentActivity() {
         pairedName = PairingStore.load(this)?.let { Build.MODEL ?: "Android 휴대폰" }
         galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
         remoteControlEnabled = PhoneRemoteControlService.isRunning()
+        notificationAccessGranted = hasNotificationAccess()
+        phonePermissionGranted = hasPhonePermission()
         ConnectionState.receivedFiles.value = listReceivedFiles()
         setContent {
             val linkStatus by ConnectionState.status.collectAsState()
@@ -179,8 +184,8 @@ class MainActivity : ComponentActivity() {
                         galleryAccessGranted = galleryAccessGranted,
                         remoteControlEnabled = remoteControlEnabled,
                         updateState = updateState,
-                        notificationAccessGranted = hasNotificationAccess(),
-                        phonePermissionGranted = hasPhonePermission(),
+                        notificationAccessGranted = notificationAccessGranted,
+                        phonePermissionGranted = phonePermissionGranted,
                         onScan = ::launchScanner,
                         onReconnect = ::startLink,
                         onEnsureConnection = ::ensureLink,
@@ -188,6 +193,8 @@ class MainActivity : ComponentActivity() {
                         onPickFile = { filePicker.launch(arrayOf("*/*")) },
                         onSendClipboard = ::sendClipboardToMac,
                         onOpenReceivedFile = ::openReceivedFile,
+                        onShareReceivedFile = ::shareReceivedFile,
+                        onDeleteReceivedFile = ::deleteReceivedFile,
                         onStartScreenShare = ::requestScreenMirror,
                         onStopScreenShare = ::stopScreenMirror,
                         onOpenNotificationSettings = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
@@ -228,6 +235,8 @@ class MainActivity : ComponentActivity() {
         updateCheckHandler.postDelayed(foregroundUpdateCheck, FOREGROUND_UPDATE_CHECK_INTERVAL_MS)
         galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
         remoteControlEnabled = PhoneRemoteControlService.isRunning()
+        notificationAccessGranted = hasNotificationAccess()
+        phonePermissionGranted = hasPhonePermission()
     }
 
     override fun onPause() {
@@ -358,21 +367,60 @@ class MainActivity : ComponentActivity() {
 
     private fun listReceivedFiles(): List<ReceivedFileItem> {
         val directory = getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir
-        return directory.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }?.map { file ->
+        val now = System.currentTimeMillis()
+        return directory.listFiles()?.onEach { file ->
+            val isTemporary = file.name.startsWith("phonebridge-") && file.name.endsWith(".part")
+            if (file.isFile && isTemporary && now - file.lastModified() > java.util.concurrent.TimeUnit.DAYS.toMillis(1)) file.delete()
+        }?.filter { it.isFile && !(it.name.startsWith("phonebridge-") && it.name.endsWith(".part")) }
+            ?.sortedByDescending { it.lastModified() }?.map { file ->
             ReceivedFileItem(file.name, file.absolutePath, java.net.URLConnection.guessContentTypeFromName(file.name) ?: "application/octet-stream", file.length())
         }.orEmpty()
     }
 
     private fun openReceivedFile(item: ReceivedFileItem) {
-        val file = java.io.File(item.path)
-        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
-        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, item.contentType).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         try {
+            val file = resolveReceivedFile(item) ?: error("받은 파일을 찾을 수 없습니다.")
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+            val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, item.contentType).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(intent)
         } catch (_: ActivityNotFoundException) {
             Toast.makeText(this, "이 파일을 열 수 있는 앱이 없습니다.", Toast.LENGTH_SHORT).show()
+        } catch (error: Exception) {
+            Toast.makeText(this, error.localizedMessage ?: "파일을 열지 못했습니다.", Toast.LENGTH_LONG).show()
         }
     }
+
+    private fun shareReceivedFile(item: ReceivedFileItem) {
+        runCatching {
+            val file = resolveReceivedFile(item) ?: error("받은 파일을 찾을 수 없습니다.")
+            val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+            val shareIntent = Intent(Intent.ACTION_SEND)
+                .setType(item.contentType.ifBlank { "application/octet-stream" })
+                .putExtra(Intent.EXTRA_STREAM, uri)
+            shareIntent.clipData = android.content.ClipData.newUri(contentResolver, item.name, uri)
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(Intent.createChooser(shareIntent, "파일 공유"))
+        }.onFailure { error ->
+            Toast.makeText(this, error.localizedMessage ?: "파일을 공유하지 못했습니다.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun deleteReceivedFile(item: ReceivedFileItem) {
+        val file = resolveReceivedFile(item)
+        if (file == null || !file.delete()) {
+            Toast.makeText(this, "받은 파일을 삭제하지 못했습니다.", Toast.LENGTH_LONG).show()
+            ConnectionState.receivedFiles.value = listReceivedFiles()
+            return
+        }
+        ConnectionState.receivedFiles.value = listReceivedFiles()
+        Toast.makeText(this, "받은 파일을 삭제했습니다.", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun resolveReceivedFile(item: ReceivedFileItem): java.io.File? = runCatching {
+        val directory = (getExternalFilesDir(android.os.Environment.DIRECTORY_DOWNLOADS) ?: filesDir).canonicalFile
+        val file = java.io.File(item.path).canonicalFile
+        file.takeIf { it.isFile && it.parentFile == directory }
+    }.getOrNull()
 
     private fun sendClipboardToMac() {
         val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager

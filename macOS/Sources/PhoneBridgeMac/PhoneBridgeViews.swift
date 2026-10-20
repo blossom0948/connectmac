@@ -763,6 +763,41 @@ private struct FileTransferView: View {
             if let message = model.actionMessage {
                 Label(message, systemImage: "checkmark.circle").font(.caption).foregroundStyle(.secondary)
             }
+            if !model.outgoingTransfers.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text("전송 대기열").font(.headline)
+                        Spacer()
+                        Text("\(model.outgoingTransfers.filter { $0.status == .queued || $0.status == .preparing || $0.status == .sending }.count)개 진행 중")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(model.outgoingTransfers.prefix(6)) { transfer in
+                        HStack(spacing: 11) {
+                            Image(systemName: transferIcon(for: transfer.status))
+                                .foregroundStyle(transferColor(for: transfer.status))
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(transfer.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                                Text(transfer.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            Spacer(minLength: 6)
+                            Text(transfer.status.title).font(.caption.weight(.medium)).foregroundStyle(transferColor(for: transfer.status))
+                            if transfer.status == .failed {
+                                Button("다시 시도") { model.retryFileTransfer(transfer.id) }
+                                    .buttonStyle(.bordered).phoneBridgeHover().controlSize(.small)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    }
+                    if model.outgoingTransfers.count > 6 {
+                        Text("최근 6개 전송을 표시합니다.").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(14)
+                .phoneBridgeSurface(cornerRadius: 17)
+            }
             Text("받은 항목").font(.headline).padding(.top, 4)
             if files.isEmpty {
                 EmptyStateView(title: photosOnly ? "받은 사진이 없습니다" : "받은 파일이 없습니다", icon: photosOnly ? "photo" : "folder", detail: "Android 앱에서 사진이나 파일을 선택해 보내거나, Mac에서 휴대폰으로 전송하세요.")
@@ -806,23 +841,70 @@ private struct FileTransferView: View {
             return true
         }
     }
+
+    private func transferIcon(for status: OutgoingTransferStatus) -> String {
+        switch status {
+        case .queued: "clock"
+        case .preparing: "doc.badge.ellipsis"
+        case .sending: "arrow.up.circle"
+        case .completed: "checkmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    private func transferColor(for status: OutgoingTransferStatus) -> Color {
+        switch status {
+        case .queued, .preparing: .secondary
+        case .sending: .blue
+        case .completed: .green
+        case .failed: .orange
+        }
+    }
 }
 
 private struct PhoneGalleryView: View {
     @EnvironmentObject private var model: PhoneBridgeModel
+    @StateObject private var local = PhoneBridgeViewState()
     private let columns = [GridItem(.adaptive(minimum: 132), spacing: 12)]
+
+    private var selectedItems: [PhoneGalleryItem] {
+        model.galleryItems.filter { local.selectedGalleryAssetIDs.contains($0.id) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 17) {
             HStack(alignment: .top) {
                 pageHeading("휴대폰 갤러리", subtitle: "Android에서 허용한 사진을 둘러보고 원본을 Mac으로 받습니다.")
                 Spacer()
-                Button { model.requestGallery() } label: {
-                    Label("새로 고침", systemImage: "arrow.clockwise")
+                if local.gallerySelectionMode {
+                    Button("취소") {
+                        local.gallerySelectionMode = false
+                        local.selectedGalleryAssetIDs.removeAll()
+                    }
+                    .buttonStyle(.bordered)
+                    .phoneBridgeHover()
+                    Button {
+                        model.downloadGalleryItems(selectedItems)
+                        local.gallerySelectionMode = false
+                        local.selectedGalleryAssetIDs.removeAll()
+                    } label: {
+                        Label("선택 항목 받기 · \(local.selectedGalleryAssetIDs.count)", systemImage: "arrow.down.circle.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .phoneBridgeHover()
+                    .disabled(local.selectedGalleryAssetIDs.isEmpty || !model.isConnected)
+                } else {
+                    Button("선택") { local.gallerySelectionMode = true }
+                        .buttonStyle(.bordered)
+                        .phoneBridgeHover()
+                        .disabled(model.galleryItems.isEmpty)
+                    Button { model.requestGallery() } label: {
+                        Label("새로 고침", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .phoneBridgeHover()
+                    .disabled(!model.isConnected || model.galleryIsLoading)
                 }
-                .buttonStyle(.bordered)
-                .phoneBridgeHover()
-                .disabled(!model.isConnected || model.galleryIsLoading)
             }
             Label(model.galleryStatus, systemImage: model.galleryIsLoading ? "arrow.triangle.2.circlepath" : "info.circle")
                 .font(.caption)
@@ -838,33 +920,59 @@ private struct PhoneGalleryView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                         ForEach(model.galleryItems) { item in
-                            Button { model.downloadGalleryItem(item) } label: {
-                                VStack(alignment: .leading, spacing: 7) {
-                                    Group {
-                                        if let image = item.thumbnail {
-                                            Image(nsImage: image)
-                                                .resizable()
-                                                .scaledToFill()
-                                        } else {
-                                            ZStack {
-                                                Color.secondary.opacity(0.08)
-                                                Image(systemName: "photo")
-                                                    .font(.system(size: 28))
-                                                    .foregroundStyle(.tertiary)
+                            let selected = local.selectedGalleryAssetIDs.contains(item.id)
+                            let downloading = model.galleryDownloadingAssetIDs.contains(item.id)
+                            Button {
+                                if local.gallerySelectionMode {
+                                    if selected { local.selectedGalleryAssetIDs.remove(item.id) }
+                                    else { local.selectedGalleryAssetIDs.insert(item.id) }
+                                } else {
+                                    model.downloadGalleryItem(item)
+                                }
+                            } label: {
+                                ZStack(alignment: .topTrailing) {
+                                    VStack(alignment: .leading, spacing: 7) {
+                                        Group {
+                                            if let image = item.thumbnail {
+                                                Image(nsImage: image)
+                                                    .resizable()
+                                                    .scaledToFill()
+                                            } else {
+                                                ZStack {
+                                                    Color.secondary.opacity(0.08)
+                                                    Image(systemName: "photo")
+                                                        .font(.system(size: 28))
+                                                        .foregroundStyle(.tertiary)
+                                                }
                                             }
                                         }
+                                        .frame(height: 116)
+                                        .frame(maxWidth: .infinity)
+                                        .clipped()
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        Text(item.name)
+                                            .font(.caption.weight(.medium))
+                                            .lineLimit(1)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
                                     }
-                                    .frame(height: 116)
-                                    .frame(maxWidth: .infinity)
-                                    .clipped()
-                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                    Text(item.name)
-                                        .font(.caption.weight(.medium))
-                                        .lineLimit(1)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                    Text(ByteCountFormatter.string(fromByteCount: item.size, countStyle: .file))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
+                                    if local.gallerySelectionMode {
+                                        Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                            .font(.title3)
+                                            .foregroundStyle(selected ? Color.accentColor : Color.white)
+                                            .shadow(color: .black.opacity(0.55), radius: 3, y: 1)
+                                            .padding(11)
+                                    } else if downloading {
+                                        let isActive = model.activeGalleryDownloadAssetID == item.id
+                                        Label(isActive ? "받는 중" : "대기 중", systemImage: isActive ? "arrow.down.circle.fill" : "clock")
+                                            .font(.caption2.weight(.semibold))
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 5)
+                                            .background(.regularMaterial, in: Capsule())
+                                            .padding(8)
+                                    }
                                 }
                                 .padding(8)
                                 .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
@@ -872,8 +980,9 @@ private struct PhoneGalleryView: View {
                             .buttonStyle(.plain)
                             .phoneBridgeHover()
                             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(.quaternary, lineWidth: 1))
-                            .help("클릭하면 원본 사진을 휴대폰에서 받습니다")
+                            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(selected ? Color.accentColor : Color.primary.opacity(0.07), lineWidth: selected ? 2 : 1))
+                            .help(local.gallerySelectionMode ? "사진을 눌러 전송 대상을 선택하세요" : "클릭하면 원본을 받습니다")
+                            .disabled(downloading)
                         }
                     }
                     .padding(.vertical, 2)
@@ -1317,6 +1426,8 @@ private final class PhoneBridgeViewState: ObservableObject {
     @Published var recipient = ""
     @Published var bodyText = ""
     @Published var number = ""
+    @Published var gallerySelectionMode = false
+    @Published var selectedGalleryAssetIDs = Set<String>()
 }
 
 private struct PhoneBridgeAmbientBackdrop: View {
