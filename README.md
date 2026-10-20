@@ -88,7 +88,7 @@ Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.grad
 scripts/package-release.sh 0.3.0
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.0/`에 만듭니다. 이 네 파일을 같은 이름으로 GitHub의 `v0.3.0` 릴리스에 올리면 각 앱의 내장 업데이트 주소가 그 릴리스를 읽습니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.0/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 네 파일을 같은 이름으로 GitHub의 `v0.3.0` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 

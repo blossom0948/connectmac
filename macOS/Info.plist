@@ -17,7 +17,7 @@
     <key>CFBundleVersion</key>
     <string>2</string>
     <key>SUFeedURL</key>
-    <string>https://github.com/blossom0948/connectmac/releases/latest/download/appcast.xml</string>
+    <string>https://raw.githubusercontent.com/blossom0948/connectmac/main/updates/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>5WmLbUOpwaXOYkMJFxzi8BjFjKSUWLJQGcP6aklESRM=</string>
     <key>SUEnableAutomaticChecks</key>

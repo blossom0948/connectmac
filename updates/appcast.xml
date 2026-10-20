@@ -1,0 +1,27 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>PhoneBridge</title>
+        <item>
+            <title>0.2.0</title>
+            <pubDate>Tue, 20 Oct 2026 14:26:46 +0900</pubDate>
+            <sparkle:version>2</sparkle:version>
+            <sparkle:shortVersionString>0.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[PhoneBridge 0.2.0
+
+- 앱 안 업데이트와 공통 앱 아이콘을 추가했습니다.
+- 연결, 알림 및 파일 전송 기능을 다듬었습니다.
+]]></description>
+            <enclosure url="https://github.com/blossom0948/connectmac/releases/download/v0.2.0/PhoneBridge-macOS.dmg" length="3474007" type="application/octet-stream" sparkle:edSignature="oH67cW4K0YX2WgZjQ4Hs1iR3XFP94Z0CrNgZJIAwobk9ihsEbWog//amo8U7kuhrA2dpPFKHGQITSZZYe+8XCg=="/>
+        </item>
+    </channel>
+</rss>
+<!-- sparkle-signatures:
+edSignature: 4HizS0N4+yHJXKKOPgOgo3NaAJElVW3NB9vVay6oLugLVUBb6QelMGhegw46EdRhyQUPSeKfkOoqygzCdMspBQ==
+length: 1355
+-->

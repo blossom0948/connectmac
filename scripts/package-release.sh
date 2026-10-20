@@ -110,6 +110,9 @@ PhoneBridge $VERSION
 EOF
 "$SPARKLE_BIN/generate_appcast" --download-url-prefix "$DOWNLOAD_PREFIX" --embed-release-notes "$SPARKLE_STAGE"
 cp "$SPARKLE_STAGE/appcast.xml" "$RELEASE_DIR/appcast.xml"
+mkdir -p "$ROOT/updates"
+cp "$SPARKLE_STAGE/appcast.xml" "$ROOT/updates/appcast.xml"
+cp "$RELEASE_DIR/phonebridge-update.json" "$ROOT/updates/phonebridge-update.json"
 
 cat > "$RELEASE_DIR/SHA256SUMS.txt" <<EOF
 $(shasum -a 256 "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$RELEASE_DIR/PhoneBridge-android.apk" "$RELEASE_DIR/appcast.xml" "$RELEASE_DIR/phonebridge-update.json")

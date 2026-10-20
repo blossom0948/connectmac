@@ -236,7 +236,7 @@ class PhoneBridgeUpdateManager(private val activity: ComponentActivity) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) longVersionCode else versionCode.toLong()
 
     companion object {
-        private const val UPDATE_MANIFEST_URL = "https://github.com/blossom0948/connectmac/releases/latest/download/phonebridge-update.json"
+        private const val UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/blossom0948/connectmac/main/updates/phonebridge-update.json"
         private const val RELEASE_APK_PREFIX = "https://github.com/blossom0948/connectmac/releases/download/"
         // The APKs are signed with the existing local Android debug certificate so current sideload installs upgrade in place.
         private const val RELEASE_SIGNER_SHA256 = "669674a2114fb59d85c56bba774b89fec9ce7f7ee79825769826130362a091c9"
