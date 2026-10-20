@@ -37,7 +37,13 @@ PhoneBridge는 일반 앱에 공개된 API만 사용합니다. 이 제한은 비
 
 ### Mac
 
-[PhoneBridge-macOS.dmg](https://github.com/blossom0948/connectmac/releases/latest/download/PhoneBridge-macOS.dmg)을 내려받아 더블클릭합니다. 열린 창에서 **PhoneBridge.app**을 **Applications** 폴더로 끌어 놓은 뒤 앱을 실행하세요. macOS가 개발자를 확인할 수 없다고 막으면 Finder에서 앱을 Control-클릭해 **열기**를 선택합니다. 이 개발용 빌드는 Apple 공증을 받지 않았습니다.
+[PhoneBridge-macOS.dmg](https://github.com/blossom0948/connectmac/releases/latest/download/PhoneBridge-macOS.dmg)을 내려받아 더블클릭합니다. 열린 창에서 **PhoneBridge.app**을 **Applications** 폴더로 끌어 놓은 뒤 앱을 실행하세요. macOS가 개발자를 확인할 수 없다고 막으면 Finder에서 앱을 Control-클릭해 **열기**를 선택합니다.
+
+이 개발용 빌드는 ad hoc 서명만 되어 있으며 Apple Developer ID 공증은 받지 않았습니다. 공식 Release에서 받은 앱인데도 macOS가 “손상되어 열 수 없습니다”라고 표시하면 터미널에서 격리 속성을 제거한 뒤 다시 여세요.
+
+```sh
+sudo xattr -dr com.apple.quarantine /Applications/PhoneBridge.app
+```
 
 소스에서 직접 빌드하려면 저장소 폴더에서 아래 명령을 실행합니다.
 

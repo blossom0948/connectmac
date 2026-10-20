@@ -13,4 +13,6 @@ fi
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/PhoneBridgeMac"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
+/usr/bin/codesign --force --deep --sign - --timestamp=none "$APP"
+/usr/bin/codesign --verify --deep --strict "$APP"
 echo "Created $APP"
