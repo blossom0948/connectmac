@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-}"
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: scripts/package-release.sh <version> (for example 0.3.2)" >&2
+  echo "Usage: scripts/package-release.sh <version> (for example 0.3.3)" >&2
   exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,7 +79,7 @@ cat > "$RELEASE_DIR/phonebridge-update.json" <<EOF
   "versionCode": $VERSION_CODE,
   "apkUrl": "${DOWNLOAD_PREFIX}PhoneBridge-android.apk",
   "sha256": "$APK_SHA256",
-  "notes": "연결 상태 확인 신호와 Wi-Fi 전환 후 자동 재연결을 개선했습니다."
+  "notes": "버튼을 눌러도 페어링이 지워지지 않도록 정리하고 연결 복구를 강화했습니다. Android 화면을 연결·전송·설정 탭으로 새롭게 구성했습니다."
 }
 EOF
 
@@ -105,7 +105,9 @@ cp "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$SPARKLE_STAGE/PhoneBridge-macOS.dmg"
 cat > "$SPARKLE_STAGE/PhoneBridge-macOS.md" <<EOF
 PhoneBridge $VERSION
 
-- Android와 Mac은 암호화된 연결 확인 신호를 사용해 죽은 연결을 감지합니다.
+- Android 연결 해제를 설정 안의 확인 단계로 옮기고, 버튼 한 번으로 페어링이 지워지지 않게 했습니다.
+- Android 화면을 연결·전송·설정 세 탭으로 나누고 글자 대비와 크기, 짧은 화면 전환과 버튼 반응을 개선했습니다.
+- 암호화된 연결 확인은 정상 Mac 명령도 연결 상태 증거로 계산하며, 응답 대기 시간을 늘려 작업 중 오탐 연결 종료를 줄입니다.
 - Wi-Fi 연결이 끊기거나 바뀌면 Android가 Bonjour 검색으로 Mac을 다시 찾고, 재시도 간격은 최대 30초까지 늘어납니다.
 - Mac의 로컬 TCP 수신기가 오류로 중단되면 자동으로 다시 시작합니다.
 EOF

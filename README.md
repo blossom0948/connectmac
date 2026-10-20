@@ -1,11 +1,12 @@
 # PhoneBridge
 
-Mac과 Android 휴대폰을 같은 로컬 Wi‑Fi에서 연결하는 앱입니다. Phone Link에서 익숙한 개요·알림·메시지·통화·사진·파일·미디어·휴대폰 화면 구성을 제공합니다. EchoPods의 푸른 포인트와 둥근 표면 스타일을 잇고, macOS 26 이상에서는 플로팅 사이드바와 제어 도구 막대에 실제 SwiftUI Liquid Glass를 적용했습니다. Android는 Apple API를 사용하지 않고 Compose 기반 blur/lens 재질과 터치 피드백을 사용합니다. 기능 비교와 현재 플랫폼 경계는 [FEATURE_COMPARISON.md](FEATURE_COMPARISON.md)에 정리했습니다.
+Mac과 Android 휴대폰을 같은 로컬 Wi‑Fi에서 연결하는 앱입니다. Phone Link에서 익숙한 개요·알림·메시지·통화·사진·파일·미디어·휴대폰 화면 구성을 제공합니다. EchoPods의 푸른 포인트와 둥근 표면 스타일을 잇고, macOS 26 이상에서는 플로팅 사이드바와 제어 도구 막대에 실제 SwiftUI Liquid Glass를 적용했습니다. Android는 Apple API를 사용하지 않고 Compose 기반 반투명 표면, 읽기 쉬운 대비, 연결·전송·설정 탭, 짧은 화면 전환과 버튼 반응을 사용합니다. 기능 비교와 현재 플랫폼 경계는 [FEATURE_COMPARISON.md](FEATURE_COMPARISON.md)에 정리했습니다.
 
 ## 현재 구현된 기능
 
 - QR 코드로 최초 페어링하고 같은 Wi‑Fi에서 Bonjour/NSD로 자동 재연결
-- Android가 15초마다 암호화된 연결 확인 신호를 보내고, 45초 동안 Mac 응답이 없으면 재검색합니다. 네트워크가 돌아오면 1초부터 최대 30초 간격으로 다시 연결을 시도하며 Mac 수신기도 오류 후 자동 복구합니다.
+- Android가 20초마다 암호화된 연결 확인 신호를 보내고, 90초 동안 Mac 응답이 없으면 재검색합니다. 정상 Mac 명령도 연결 확인으로 계산해 작업 중 오탐 종료를 줄입니다. 네트워크가 돌아오면 1초부터 최대 30초 간격으로 다시 연결을 시도하며 Mac 수신기도 오류 후 자동 복구합니다.
+- Android는 연결·전송·설정 탭으로 기능을 나눠 긴 한 화면 스크롤을 줄이고, 페어링 해제는 설정에서 확인한 뒤에만 실행합니다.
 - 페어링 키를 Mac Keychain과 Android Keystore 기반 저장소에 보관하고 연결 이벤트와 명령을 AES‑GCM으로 암호화
 - Android 알림을 Mac 앱과 macOS 알림 배너로 전달하고 Mac에서 휴대폰 알림 지우기
 - 알림 접근을 켜면 현재 휴대폰에 떠 있는 알림도 가져오고 새 알림을 실시간 동기화
@@ -90,10 +91,10 @@ cd android
 Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.gradle.kts`에서 같은 값으로 올리고 Android `versionCode`도 증가시킨 뒤 다음 명령을 실행합니다.
 
 ```sh
-scripts/package-release.sh 0.3.2
+scripts/package-release.sh 0.3.3
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.2/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.2` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.3/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.3` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 

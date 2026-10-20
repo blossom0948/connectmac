@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.phonebridge.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3002
-        versionName = "0.3.2"
+        versionCode = 3003
+        versionName = "0.3.3"
     }
 
     buildFeatures {
@@ -37,7 +37,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-    implementation("io.github.kyant0:backdrop:2.0.0-alpha03")
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.1")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
     debugImplementation("androidx.compose.ui:ui-tooling")

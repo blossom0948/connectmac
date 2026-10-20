@@ -22,6 +22,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -61,6 +62,9 @@ import com.example.phonebridge.android.link.PhoneGalleryBridge
 import com.example.phonebridge.android.remote.PhoneRemoteControlService
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
@@ -72,6 +76,7 @@ import com.example.phonebridge.android.update.PhoneBridgeUpdateWorker
 
 class MainActivity : ComponentActivity() {
     private var pairedName by mutableStateOf<String?>(null)
+    private var systemBarPadding by mutableStateOf(PaddingValues(0.dp))
     private var galleryAccessGranted by mutableStateOf(false)
     private var remoteControlEnabled by mutableStateOf(false)
     private val updateManager by lazy { PhoneBridgeUpdateManager(this) }
@@ -136,6 +141,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val nightMode = resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = nightMode != android.content.res.Configuration.UI_MODE_NIGHT_YES
+            isAppearanceLightNavigationBars = nightMode != android.content.res.Configuration.UI_MODE_NIGHT_YES
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, windowInsets ->
+            val bars = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            val density = resources.displayMetrics.density
+            systemBarPadding = PaddingValues(
+                start = (bars.left / density).dp,
+                top = (bars.top / density).dp,
+                end = (bars.right / density).dp,
+                bottom = (bars.bottom / density).dp,
+            )
+            windowInsets
+        }
+        ViewCompat.requestApplyInsets(window.decorView)
         pairedName = PairingStore.load(this)?.let { Build.MODEL ?: "Android 휴대폰" }
         galleryAccessGranted = PhoneGalleryBridge.hasAccess(this)
         remoteControlEnabled = PhoneRemoteControlService.isRunning()
@@ -147,190 +169,39 @@ class MainActivity : ComponentActivity() {
             val updateState by updateManager.state.collectAsState()
             PhoneBridgeTheme {
                 PhoneBridgeBackdrop {
-                    Column(
-                        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(17.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Image(
-                                painter = painterResource(com.example.phonebridge.android.R.drawable.phonebridge_mark),
-                                contentDescription = "PhoneBridge 아이콘",
-                                modifier = Modifier.size(48.dp),
-                            )
-                            Column {
-                                Text("PhoneBridge", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                Text("내 휴대폰과 Mac을 자연스럽게 연결", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                    PhoneBridgeApp(
+                        pairedName = pairedName,
+                        systemBarPadding = systemBarPadding,
+                        linkStatus = linkStatus,
+                        receivedFiles = receivedFiles,
+                        screenShareStatus = screenShareStatus,
+                        galleryAccessGranted = galleryAccessGranted,
+                        remoteControlEnabled = remoteControlEnabled,
+                        updateState = updateState,
+                        notificationAccessGranted = hasNotificationAccess(),
+                        phonePermissionGranted = hasPhonePermission(),
+                        onScan = ::launchScanner,
+                        onReconnect = ::startLink,
+                        onPickPhotos = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                        onPickFile = { filePicker.launch(arrayOf("*/*")) },
+                        onSendClipboard = ::sendClipboardToMac,
+                        onOpenReceivedFile = ::openReceivedFile,
+                        onStartScreenShare = ::requestScreenMirror,
+                        onStopScreenShare = ::stopScreenMirror,
+                        onOpenNotificationSettings = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+                        onRequestCallPermission = { callPermission.launch(Manifest.permission.READ_PHONE_STATE) },
+                        onRequestGalleryPermission = ::requestGalleryPermission,
+                        onOpenAccessibilitySettings = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                        onUnpair = ::unpair,
+                        onUpdateAction = { state ->
+                            when (state) {
+                                is PhoneBridgeUpdateState.Available -> updateManager.download(state.release)
+                                is PhoneBridgeUpdateState.Ready -> updateManager.install(state.release, state.apk)
+                                is PhoneBridgeUpdateState.InstallPermissionRequired -> updateManager.openInstallPermissionSettings()
+                                else -> updateManager.checkForUpdates(force = true)
                             }
-                        }
-
-                        PhoneBridgeGlassPanel(Modifier.fillMaxWidth()) {
-                            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(15.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("기기 연결", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Spacer(Modifier.weight(1f))
-                                    val connected = linkStatus.startsWith("Mac에 연결됨")
-                                    Surface(
-                                        color = (if (connected) Color(0xFF21A675) else Color(0xFFDC9A36)).copy(alpha = 0.14f),
-                                        shape = CircleShape,
-                                    ) {
-                                        Row(Modifier.padding(horizontal = 11.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                                            Surface(color = if (connected) Color(0xFF21A675) else Color(0xFFDC9A36), shape = CircleShape, modifier = Modifier.size(7.dp)) { }
-                                            Text(if (connected) "연결됨" else "연결 대기", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface)
-                                        }
-                                    }
-                                }
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-                                        shape = RoundedCornerShape(22.dp),
-                                        modifier = Modifier.size(68.dp),
-                                    ) {
-                                        Box(contentAlignment = Alignment.Center) {
-                                            Text("▯", fontSize = 37.sp, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Light)
-                                        }
-                                    }
-                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Text(pairedName ?: "휴대폰을 연결하세요", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
-                                        Text(if (PairingStore.load(this@MainActivity) != null) linkStatus else "QR 코드를 스캔해 안전하게 페어링", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                                    }
-                                }
-                                if (PairingStore.load(this@MainActivity) == null) {
-                                    Button(
-                                        onClick = ::launchScanner,
-                                        modifier = Modifier.fillMaxWidth().height(54.dp),
-                                        shape = RoundedCornerShape(18.dp),
-                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                    ) { Text("Mac QR 코드 스캔", fontWeight = FontWeight.SemiBold) }
-                                } else {
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                        Button(
-                                            onClick = ::startLink,
-                                            modifier = Modifier.weight(1f).height(52.dp),
-                                            shape = RoundedCornerShape(17.dp),
-                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                                        ) { Text("Mac에 연결", fontWeight = FontWeight.SemiBold) }
-                                        OutlinedButton(
-                                            onClick = ::unpair,
-                                            modifier = Modifier.weight(1f).height(52.dp),
-                                            shape = RoundedCornerShape(17.dp),
-                                        ) { Text("연결 해제") }
-                                    }
-                                }
-                            }
-                        }
-
-                        PhoneBridgeSurface(Modifier.fillMaxWidth()) {
-                            Column(Modifier.fillMaxWidth().padding(horizontal = 17.dp, vertical = 15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text("앱 업데이트", fontWeight = FontWeight.SemiBold)
-                                    Spacer(Modifier.weight(1f))
-                                    Text("v${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                                }
-                                Text(updateState.description(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                                if (updateState is PhoneBridgeUpdateState.Downloading) {
-                                    val progress = (updateState as PhoneBridgeUpdateState.Downloading).progress
-                                    if (progress != null) Text("다운로드 $progress%", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
-                                }
-                                TextButton(
-                                    onClick = {
-                                        when (val state = updateState) {
-                                            is PhoneBridgeUpdateState.Available -> updateManager.download(state.release)
-                                            is PhoneBridgeUpdateState.Ready -> updateManager.install(state.release, state.apk)
-                                            is PhoneBridgeUpdateState.InstallPermissionRequired -> updateManager.openInstallPermissionSettings()
-                                            else -> updateManager.checkForUpdates(force = true)
-                                        }
-                                    },
-                                    enabled = updateState !is PhoneBridgeUpdateState.Checking && updateState !is PhoneBridgeUpdateState.Downloading && updateState !is PhoneBridgeUpdateState.AwaitingSystemConfirmation,
-                                    modifier = Modifier.align(Alignment.End),
-                                ) {
-                                    Text(
-                                        when (updateState) {
-                                            is PhoneBridgeUpdateState.Available -> "업데이트 다운로드"
-                                            is PhoneBridgeUpdateState.Ready -> "시스템에서 설치"
-                                            is PhoneBridgeUpdateState.InstallPermissionRequired -> "설치 권한 설정"
-                                            is PhoneBridgeUpdateState.AwaitingSystemConfirmation -> "시스템 확인 대기 중"
-                                            is PhoneBridgeUpdateState.Checking -> "확인 중…"
-                                            is PhoneBridgeUpdateState.Downloading -> "다운로드 중…"
-                                            is PhoneBridgeUpdateState.Installed -> "업데이트 확인"
-                                            is PhoneBridgeUpdateState.UpToDate -> "업데이트 확인"
-                                            is PhoneBridgeUpdateState.Failed -> "다시 확인"
-                                            PhoneBridgeUpdateState.Idle -> "업데이트 확인"
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
-                        SectionHeading("함께 사용할 기능", "필요한 권한만 선택해 켜세요")
-                        PermissionCard(
-                            title = "알림",
-                            detail = if (hasNotificationAccess()) "허용됨 · 휴대폰 알림을 Mac으로 전달할 수 있습니다" else "원하는 앱 알림을 Mac으로 전달하도록 접근을 허용하세요",
-                            button = if (hasNotificationAccess()) "접근 설정 관리" else "알림 접근 허용",
-                            onClick = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-                        )
-                        PermissionCard(
-                            title = "통화 상태",
-                            detail = if (hasPhonePermission()) "허용됨 · 전화 수신/통화 상태만 전달합니다" else "선택 권한 · 발신자 정보나 통화 음성은 전달하지 않습니다",
-                            button = if (hasPhonePermission()) "권한 허용됨" else "통화 상태 허용",
-                            onClick = {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) callPermission.launch(Manifest.permission.READ_PHONE_STATE)
-                            }
-                        )
-                        PermissionCard(
-                            title = "사진 라이브러리",
-                            detail = if (galleryAccessGranted) "허용됨 · 사용자가 허용한 범위의 사진만 Mac 갤러리에 표시합니다" else "Mac에서 사진을 둘러볼 때 사용합니다. Android 14 이상에서는 선택한 사진만 허용할 수 있습니다",
-                            button = if (galleryAccessGranted) "사진 접근 범위 변경" else "사진 접근 허용",
-                            onClick = ::requestGalleryPermission,
-                        )
-                        PermissionCard(
-                            title = "Mac에서 화면 조작",
-                            detail = if (remoteControlEnabled) "허용됨 · 화면 공유 중 탭/스와이프만 전달하며 화면의 글자나 접근성 트리는 읽지 않습니다" else "선택 권한 · 화면 공유와 별도로 Android 접근성 설정에서 직접 켜야 합니다",
-                            button = if (remoteControlEnabled) "접근성 설정 관리" else "원격 터치 설정",
-                            onClick = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                        )
-
-                        SectionHeading("사진과 파일", "필요한 항목만 골라 기기 간 전송")
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(onClick = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }, modifier = Modifier.weight(1f).height(50.dp), shape = RoundedCornerShape(16.dp)) { Text("사진 선택") }
-                            OutlinedButton(onClick = { filePicker.launch(arrayOf("*/*")) }, modifier = Modifier.weight(1f).height(50.dp), shape = RoundedCornerShape(16.dp)) { Text("파일 선택") }
-                        }
-                        Text("선택한 항목은 Mac으로 전송됩니다. Mac에서 보낸 파일은 이 앱의 다운로드 보관함에 저장됩니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-
-                        SectionHeading("클립보드", "직접 누를 때만 텍스트를 전송합니다")
-                        OutlinedButton(
-                            onClick = ::sendClipboardToMac,
-                            enabled = LinkService.isConnected(),
-                            modifier = Modifier.fillMaxWidth().height(52.dp),
-                            shape = RoundedCornerShape(17.dp),
-                        ) { Text("휴대폰 클립보드를 Mac으로 보내기") }
-
-                        if (receivedFiles.isNotEmpty()) {
-                            SectionHeading("Mac에서 받은 항목", "이 기기에 저장된 파일")
-                            receivedFiles.forEach { item ->
-                                PhoneBridgeSurface(Modifier.fillMaxWidth()) {
-                                    Row(Modifier.fillMaxWidth().padding(15.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Column(Modifier.weight(1f)) {
-                                            Text(item.name, fontWeight = FontWeight.Medium, maxLines = 1)
-                                            Text(android.text.format.Formatter.formatFileSize(this@MainActivity, item.size), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                                        }
-                                        TextButton(onClick = { openReceivedFile(item) }) { Text("열기") }
-                                    }
-                                }
-                            }
-                        }
-                        SectionHeading("폰 화면", "공유를 시작하면 Mac에서 미리 볼 수 있습니다")
-                        Text("화면을 Mac에 공유하려면 시스템 화면 캡처 확인을 승인하세요. 공유 중에는 Android 상태 표시줄에서 언제든 중지할 수 있습니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                        OutlinedButton(
-                            onClick = { if (screenShareStatus == "화면 공유 중") stopScreenMirror() else requestScreenMirror() },
-                            enabled = LinkService.isConnected(),
-                            modifier = Modifier.fillMaxWidth().height(52.dp),
-                            shape = RoundedCornerShape(17.dp),
-                        ) {
-                            Text(if (screenShareStatus == "화면 공유 중") "화면 공유 중지" else "화면 공유 시작")
-                        }
-                        Text(screenShareStatus, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                        Text("연결은 로컬 Wi‑Fi에서 유지됩니다. 연결 중에는 Android에 PhoneBridge 지속 알림이 표시됩니다.", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
-                    }
+                        },
+                    )
                 }
             }
         }

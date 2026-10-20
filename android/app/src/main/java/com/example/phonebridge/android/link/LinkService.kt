@@ -76,19 +76,19 @@ class LinkService : Service() {
         private const val PHONE_ACTION_CHANNEL_ID = "phonebridge_phone_actions"
         private const val NOTIFICATION_ID = 4101
         private const val SERVICE_TYPE = "_phonebridge._tcp."
-        private const val HEARTBEAT_INTERVAL_MS = 15_000L
-        private const val HEARTBEAT_TIMEOUT_MS = 45_000L
+        private const val HEARTBEAT_INTERVAL_MS = 20_000L
+        private const val HEARTBEAT_TIMEOUT_MS = 90_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
         private val heartbeatScheduler = Executors.newSingleThreadScheduledExecutor()
         private val connectionLock = Any()
         private data class ActiveSession(val socket: Socket, val writer: BufferedWriter, val key: ByteArray)
         @Volatile private var activeSession: ActiveSession? = null
         @Volatile private var connecting = false
-        @Volatile private var lastHeartbeatAt = 0L
+        @Volatile private var lastServerActivityAt = 0L
 
         fun sendEvent(context: Context, event: JSONObject) {
             val session = activeSession ?: return
-            runCatching {
+            try {
                 val line = LinkCrypto.seal(session.key, event).toString()
                 synchronized(session.writer) {
                     if (activeSession !== session || session.socket.isClosed) return
@@ -96,6 +96,9 @@ class LinkService : Service() {
                     session.writer.newLine()
                     session.writer.flush()
                 }
+            } catch (_: Exception) {
+                // Closing the socket wakes the reader, which clears this session and starts discovery again.
+                if (activeSession === session) runCatching { session.socket.close() }
             }
         }
 
@@ -362,19 +365,19 @@ class LinkService : Service() {
             val heartbeatSupported = capabilities != null && (0 until capabilities.length()).any {
                 capabilities.optString(it) == "heartbeat-v1"
             }
-            socket.soTimeout = if (heartbeatSupported) HEARTBEAT_TIMEOUT_MS.toInt() else 0
+            socket.soTimeout = if (heartbeatSupported) (HEARTBEAT_TIMEOUT_MS + 5_000L).toInt() else 0
             val sessionKey = LinkCrypto.deriveSessionKey(secret, nonce)
             synchronized(connectionLock) {
                 activeSession?.takeIf { it.socket !== socket }?.let { runCatching { it.socket.close() } }
                 activeSession = ActiveSession(socket, writer, sessionKey)
-                lastHeartbeatAt = SystemClock.elapsedRealtime()
+                lastServerActivityAt = SystemClock.elapsedRealtime()
                 connecting = false
             }
             heartbeatFuture?.cancel(false)
             heartbeatFuture = if (heartbeatSupported) {
                 heartbeatScheduler.scheduleAtFixedRate({
                     if (activeSession?.socket !== socket || socket.isClosed) return@scheduleAtFixedRate
-                    if (SystemClock.elapsedRealtime() - lastHeartbeatAt >= HEARTBEAT_TIMEOUT_MS) {
+                    if (SystemClock.elapsedRealtime() - lastServerActivityAt >= HEARTBEAT_TIMEOUT_MS) {
                         handleConnectionLoss(socket, "Mac 응답이 없어 다시 연결하는 중…")
                         return@scheduleAtFixedRate
                     }
@@ -407,8 +410,11 @@ class LinkService : Service() {
             while (!socket.isClosed) {
                 val line = reader.readLine() ?: break
                 val command = LinkCrypto.open(sessionKey, JSONObject(line))
+                // Any authenticated Mac command proves the channel is alive. Counting only pongs
+                // incorrectly dropped the session during larger interactive operations.
+                lastServerActivityAt = SystemClock.elapsedRealtime()
                 if (command.optString("kind") == "heartbeat_pong") {
-                    lastHeartbeatAt = SystemClock.elapsedRealtime()
+                    lastServerActivityAt = SystemClock.elapsedRealtime()
                 } else {
                     handleCommand(command)
                 }
