@@ -2,6 +2,6 @@
   "versionName": "0.3.2",
   "versionCode": 3002,
   "apkUrl": "https://github.com/blossom0948/connectmac/releases/download/v0.3.2/PhoneBridge-android.apk",
-  "sha256": "346fccd0b95724b5601a746402104a3b16ac2f18c4c01e7fc40be85292b403f9",
+  "sha256": "1057ecf39764eeeb0d58894b77c50c3aa05a94a866bfde1568fa58f23e74dd9e",
   "notes": "연결 상태 확인 신호와 Wi-Fi 전환 후 자동 재연결을 개선했습니다."
 }

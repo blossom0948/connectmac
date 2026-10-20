@@ -18,7 +18,7 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
 - Wi-Fi 연결이 끊기거나 바뀌면 Android가 Bonjour 검색으로 Mac을 다시 찾고, 재시도 간격은 최대 30초까지 늘어납니다.
 - Mac의 로컬 TCP 수신기가 오류로 중단되면 자동으로 다시 시작합니다.
 ]]></description>
-            <enclosure url="https://github.com/blossom0948/connectmac/releases/download/v0.3.2/PhoneBridge-macOS.dmg" length="3562231" type="application/octet-stream" sparkle:edSignature="xyNOQKNN0Fv2Zp4SgcWd/thdnyNL0du+SyvlDQGaovaT1u9nJyLRI9MIXtk78yWlWIWsL2Zjm6MUElbIBVh0BQ=="/>
+            <enclosure url="https://github.com/blossom0948/connectmac/releases/download/v0.3.2/PhoneBridge-macOS.dmg" length="3561953" type="application/octet-stream" sparkle:edSignature="r715sAkbFGOlFvRGAoGYQuuUJ+KwTogZcHkbUk+Nyk/Pu7j+Tn+qyOF/Kqvn4k5zvjqS3sPmxFJgIYtmXRm4Ag=="/>
         </item>
         <item>
             <title>0.3.1</title>
@@ -56,6 +56,6 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
     </channel>
 </rss>
 <!-- sparkle-signatures:
-edSignature: AQpIoZVoieu7JOV5KnEJK0BOXfuhrYZjO/QDehfGlyE5VcU3Z8mbOMYOVZ2l2etDI5h+4/fhS1S2g7tdCHuCDg==
+edSignature: 2OFhjGFbMKmhnXVQTjVnE+dFyCk6EDUcwVEDRXLPFe1MtW2kV0lKblfpkiwNIVs4LL7WbCOq6aDQM1H96BvdDg==
 length: 4071
 -->

@@ -765,7 +765,11 @@ private final class MacLinkServer: @unchecked Sendable {
                 DispatchQueue.main.async { self.onPaired?(name) }
             }
             let responseProof = Self.hmac(key: key, text: "welcome|\(challengeText)|\(name)")
-            self.send(["type": "welcome", "proof": responseProof.base64EncodedString()], over: connection)
+            self.send([
+                "type": "welcome",
+                "proof": responseProof.base64EncodedString(),
+                "capabilities": ["heartbeat-v1"]
+            ], over: connection)
             if let previous = self.activeConnection, previous !== connection {
                 previous.cancel()
             }

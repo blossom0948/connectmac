@@ -341,7 +341,7 @@ class LinkService : Service() {
             socket.connect(java.net.InetSocketAddress(host, port), 5_000)
             socket.tcpNoDelay = true
             socket.keepAlive = true
-            socket.soTimeout = HEARTBEAT_TIMEOUT_MS.toInt()
+            socket.soTimeout = 10_000
             val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
             val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
             val challengeMessage = JSONObject(reader.readLine())
@@ -358,6 +358,11 @@ class LinkService : Service() {
             check(welcome.optString("type") == "welcome")
             val expected = LinkCrypto.hmac(secret, "welcome|${LinkCrypto.b64(nonce)}|$deviceName")
             check(expected.contentEquals(LinkCrypto.fromB64(welcome.getString("proof"))))
+            val capabilities = welcome.optJSONArray("capabilities")
+            val heartbeatSupported = capabilities != null && (0 until capabilities.length()).any {
+                capabilities.optString(it) == "heartbeat-v1"
+            }
+            socket.soTimeout = if (heartbeatSupported) HEARTBEAT_TIMEOUT_MS.toInt() else 0
             val sessionKey = LinkCrypto.deriveSessionKey(secret, nonce)
             synchronized(connectionLock) {
                 activeSession?.takeIf { it.socket !== socket }?.let { runCatching { it.socket.close() } }
@@ -366,14 +371,16 @@ class LinkService : Service() {
                 connecting = false
             }
             heartbeatFuture?.cancel(false)
-            heartbeatFuture = heartbeatScheduler.scheduleAtFixedRate({
-                if (activeSession?.socket !== socket || socket.isClosed) return@scheduleAtFixedRate
-                if (SystemClock.elapsedRealtime() - lastHeartbeatAt > HEARTBEAT_TIMEOUT_MS) {
-                    handleConnectionLoss(socket, "Mac 응답이 없어 다시 연결하는 중…")
-                    return@scheduleAtFixedRate
-                }
-                sendEvent(this, JSONObject().put("kind", "heartbeat_ping"))
-            }, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+            heartbeatFuture = if (heartbeatSupported) {
+                heartbeatScheduler.scheduleAtFixedRate({
+                    if (activeSession?.socket !== socket || socket.isClosed) return@scheduleAtFixedRate
+                    if (SystemClock.elapsedRealtime() - lastHeartbeatAt >= HEARTBEAT_TIMEOUT_MS) {
+                        handleConnectionLoss(socket, "Mac 응답이 없어 다시 연결하는 중…")
+                        return@scheduleAtFixedRate
+                    }
+                    sendEvent(this, JSONObject().put("kind", "heartbeat_ping"))
+                }, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS)
+            } else null
             synchronized(retryLock) {
                 retryAttempt = 0
                 retryScheduled = false
