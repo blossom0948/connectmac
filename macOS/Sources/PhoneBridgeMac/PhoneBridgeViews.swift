@@ -1022,6 +1022,7 @@ private struct EmptyStateView: View {
 
 private struct SettingsView: View {
     @EnvironmentObject private var model: PhoneBridgeModel
+    @EnvironmentObject private var updater: PhoneBridgeUpdater
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("설정").font(.system(size: 28, weight: .bold, design: .rounded))
@@ -1041,6 +1042,19 @@ private struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(.secondary)
+                .padding(.vertical, 4)
+            }
+            GroupBox("앱 업데이트") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("현재 버전 \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "알 수 없음")")
+                    Text("새 버전을 확인하고 PhoneBridge 안에서 업데이트할 수 있습니다.")
+                        .foregroundStyle(.secondary)
+                    Button("업데이트 확인…") { updater.checkForUpdates() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!updater.canCheckForUpdates)
+                        .phoneBridgeHover()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)
             }
             Spacer()

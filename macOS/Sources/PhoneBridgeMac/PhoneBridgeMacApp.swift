@@ -4,23 +4,30 @@ import AppKit
 @main
 struct PhoneBridgeMacApp: App {
     @StateObject private var model = PhoneBridgeModel()
+    @StateObject private var updater = PhoneBridgeUpdater()
 
     var body: some Scene {
         WindowGroup("PhoneBridge", id: "main") {
             PhoneBridgeRootView()
                 .environmentObject(model)
+                .environmentObject(updater)
                 .frame(minWidth: 1080, minHeight: 700)
         }
         .defaultSize(width: 1200, height: 780)
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(after: .appInfo) {
+                Button("업데이트 확인…") { updater.checkForUpdates() }
+                    .disabled(!updater.canCheckForUpdates)
+            }
         }
         .windowStyle(.hiddenTitleBar)
 
         MenuBarExtra("PhoneBridge", systemImage: "iphone.gen3.radiowaves.left.and.right") {
             MenuBarCommands()
                 .environmentObject(model)
+                .environmentObject(updater)
         }
         .menuBarExtraStyle(.menu)
     }
@@ -28,6 +35,7 @@ struct PhoneBridgeMacApp: App {
 
 private struct MenuBarCommands: View {
     @EnvironmentObject private var model: PhoneBridgeModel
+    @EnvironmentObject private var updater: PhoneBridgeUpdater
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -41,6 +49,8 @@ private struct MenuBarCommands: View {
         }
         Button("휴대폰 찾기") { model.findPhone() }
             .disabled(!model.isConnected)
+        Button("업데이트 확인…") { updater.checkForUpdates() }
+            .disabled(!updater.canCheckForUpdates)
         Divider()
         Button("PhoneBridge 종료") { NSApp.terminate(nil) }
     }

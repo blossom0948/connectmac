@@ -7,7 +7,16 @@ let package = Package(
     products: [
         .executable(name: "PhoneBridgeMac", targets: ["PhoneBridgeMac"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle.git", from: "2.10.0")
+    ],
     targets: [
-        .executableTarget(name: "PhoneBridgeMac")
+        .executableTarget(
+            name: "PhoneBridgeMac",
+            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])
+            ]
+        )
     ]
 )

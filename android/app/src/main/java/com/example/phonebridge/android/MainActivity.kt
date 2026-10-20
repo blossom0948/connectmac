@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.phonebridge.android.link.ConnectionState
@@ -58,9 +60,12 @@ import androidx.core.content.ContextCompat
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import org.json.JSONObject
+import com.example.phonebridge.android.update.PhoneBridgeUpdateManager
+import com.example.phonebridge.android.update.PhoneBridgeUpdateState
 
 class MainActivity : ComponentActivity() {
     private var pairedName by mutableStateOf<String?>(null)
+    private val updateManager by lazy { PhoneBridgeUpdateManager(this) }
     private val transferExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     private val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -113,6 +118,7 @@ class MainActivity : ComponentActivity() {
             val linkStatus by ConnectionState.status.collectAsState()
             val receivedFiles by ConnectionState.receivedFiles.collectAsState()
             val screenShareStatus by ConnectionState.screenShareStatus.collectAsState()
+            val updateState by updateManager.state.collectAsState()
             PhoneBridgeTheme {
                 PhoneBridgeBackdrop {
                     Column(
@@ -120,11 +126,11 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(17.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                            Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(16.dp), modifier = Modifier.size(48.dp)) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Text("P", color = MaterialTheme.colorScheme.onPrimary, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
+                            Image(
+                                painter = painterResource(com.example.phonebridge.android.R.drawable.phonebridge_mark),
+                                contentDescription = "PhoneBridge 아이콘",
+                                modifier = Modifier.size(48.dp),
+                            )
                             Column {
                                 Text("PhoneBridge", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                                 Text("내 휴대폰과 Mac을 자연스럽게 연결", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
@@ -183,6 +189,48 @@ class MainActivity : ComponentActivity() {
                                             shape = RoundedCornerShape(17.dp),
                                         ) { Text("연결 해제") }
                                     }
+                                }
+                            }
+                        }
+
+                        PhoneBridgeSurface(Modifier.fillMaxWidth()) {
+                            Column(Modifier.fillMaxWidth().padding(horizontal = 17.dp, vertical = 15.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("앱 업데이트", fontWeight = FontWeight.SemiBold)
+                                    Spacer(Modifier.weight(1f))
+                                    Text("v${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                                }
+                                Text(updateState.description(), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp)
+                                if (updateState is PhoneBridgeUpdateState.Downloading) {
+                                    val progress = (updateState as PhoneBridgeUpdateState.Downloading).progress
+                                    if (progress != null) Text("다운로드 $progress%", color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                                }
+                                TextButton(
+                                    onClick = {
+                                        when (val state = updateState) {
+                                            is PhoneBridgeUpdateState.Available -> updateManager.download(state.release)
+                                            is PhoneBridgeUpdateState.Ready -> updateManager.install(state.release, state.apk)
+                                            is PhoneBridgeUpdateState.InstallPermissionRequired -> updateManager.openInstallPermissionSettings()
+                                            else -> updateManager.checkForUpdates(force = true)
+                                        }
+                                    },
+                                    enabled = updateState !is PhoneBridgeUpdateState.Checking && updateState !is PhoneBridgeUpdateState.Downloading && updateState !is PhoneBridgeUpdateState.AwaitingSystemConfirmation,
+                                    modifier = Modifier.align(Alignment.End),
+                                ) {
+                                    Text(
+                                        when (updateState) {
+                                            is PhoneBridgeUpdateState.Available -> "업데이트 다운로드"
+                                            is PhoneBridgeUpdateState.Ready -> "시스템에서 설치"
+                                            is PhoneBridgeUpdateState.InstallPermissionRequired -> "설치 권한 설정"
+                                            is PhoneBridgeUpdateState.AwaitingSystemConfirmation -> "시스템 확인 대기 중"
+                                            is PhoneBridgeUpdateState.Checking -> "확인 중…"
+                                            is PhoneBridgeUpdateState.Downloading -> "다운로드 중…"
+                                            is PhoneBridgeUpdateState.Installed -> "업데이트 확인"
+                                            is PhoneBridgeUpdateState.UpToDate -> "업데이트 확인"
+                                            is PhoneBridgeUpdateState.Failed -> "다시 확인"
+                                            PhoneBridgeUpdateState.Idle -> "업데이트 확인"
+                                        }
+                                    )
                                 }
                             }
                         }
@@ -250,7 +298,19 @@ class MainActivity : ComponentActivity() {
         }
 
         if (PairingStore.load(this) != null) startLink()
+        updateManager.checkForUpdates(force = false)
 
+    }
+
+    override fun onResume() {
+        super.onResume()
+        updateManager.onResume()
+    }
+
+    override fun onDestroy() {
+        updateManager.close()
+        transferExecutor.shutdown()
+        super.onDestroy()
     }
 
     private fun launchScanner() {
@@ -383,4 +443,17 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+}
+
+private fun PhoneBridgeUpdateState.description(): String = when (this) {
+    PhoneBridgeUpdateState.Idle -> "최신 버전을 앱 안에서 확인하고 설치할 수 있습니다."
+    PhoneBridgeUpdateState.Checking -> "최신 PhoneBridge 버전을 확인하고 있습니다."
+    PhoneBridgeUpdateState.UpToDate -> "현재 최신 버전입니다."
+    is PhoneBridgeUpdateState.Available -> "v${release.versionName} 업데이트가 있습니다. 앱 안에서 내려받습니다. ${release.notes}"
+    is PhoneBridgeUpdateState.Downloading -> "v${release.versionName} 업데이트를 안전하게 내려받고 있습니다."
+    is PhoneBridgeUpdateState.Ready -> "다운로드 파일과 앱 서명을 확인했습니다. 시스템 설치를 진행할 수 있습니다."
+    is PhoneBridgeUpdateState.InstallPermissionRequired -> "이 앱에서 설치하도록 Android 설정에서 한 번 허용한 뒤 돌아오세요."
+    is PhoneBridgeUpdateState.AwaitingSystemConfirmation -> "Android 시스템 설치 화면에서 업데이트를 승인하세요."
+    PhoneBridgeUpdateState.Installed -> "PhoneBridge 업데이트가 완료되었습니다."
+    is PhoneBridgeUpdateState.Failed -> message
 }
