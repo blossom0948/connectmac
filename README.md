@@ -37,13 +37,9 @@ PhoneBridge는 일반 앱에 공개된 API만 사용합니다. 이 제한은 비
 
 ### Mac
 
-[PhoneBridge-macOS.zip](https://github.com/blossom0948/connectmac/releases/latest/download/PhoneBridge-macOS.zip)을 내려받아 압축을 풀고 앱을 엽니다. macOS가 개발자를 확인할 수 없다고 막으면 Finder에서 앱을 Control-클릭해 **열기**를 선택합니다. 이 개발용 빌드는 Apple 공증을 받지 않았습니다.
+[PhoneBridge-macOS.zip](https://github.com/blossom0948/connectmac/releases/latest/download/PhoneBridge-macOS.zip)을 내려받아 압축을 풀고, 안의 **PhoneBridge.app**을 엽니다. macOS가 개발자를 확인할 수 없다고 막으면 Finder에서 앱을 Control-클릭해 **열기**를 선택합니다. 이 개발용 빌드는 Apple 공증을 받지 않았습니다.
 
-```sh
-open macOS/.build/PhoneBridge.app
-```
-
-소스에서 직접 빌드할 경우 아래 명령으로 앱을 만들고 엽니다. 프로젝트 폴더에서 실행하세요.
+소스에서 직접 빌드하려면 저장소 폴더에서 아래 명령을 실행합니다.
 
 Xcode Command Line Tools와 Swift 5.9 이상이 필요합니다.
 
