@@ -193,7 +193,7 @@ class MainActivity : ComponentActivity() {
                         phonePermissionGranted = phonePermissionGranted,
                         onScan = ::launchScanner,
                         onReconnect = ::startLink,
-                        onEnsureConnection = ::ensureLink,
+                        onOpenBatterySettings = ::openBatterySettings,
                         onPickPhotos = { photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                         onPickFile = { filePicker.launch(arrayOf("*/*")) },
                         onSendClipboard = ::sendClipboardToMac,
@@ -315,6 +315,13 @@ class MainActivity : ComponentActivity() {
             else -> arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
         galleryPermission.launch(permissions)
+    }
+
+    private fun openBatterySettings() {
+        val appSettings = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.fromParts("package", packageName, null)
+        }
+        startActivity(appSettings)
     }
 
     private fun stopScreenMirror() {

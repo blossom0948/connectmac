@@ -428,7 +428,7 @@ final class PhoneBridgeModel: ObservableObject {
         if offset == 0 { galleryItems.removeAll() }
         galleryIsLoading = true
         galleryStatus = "휴대폰 사진을 불러오는 중…"
-        server.sendSecure(["kind": "gallery_list", "offset": offset, "limit": 40])
+        server.sendSecure(["kind": "gallery_list", "offset": offset, "limit": 24])
     }
 
     func downloadGalleryItem(_ item: PhoneGalleryItem) {

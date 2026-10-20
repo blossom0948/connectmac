@@ -37,7 +37,9 @@ object PhoneGalleryBridge {
         }
 
         val safeOffset = offset.coerceIn(0, 20_000)
-        val limit = requestedLimit.coerceIn(1, 60)
+        // Keep the first-page burst small so browsing a large library does not compete
+        // with the persistent control channel or its heartbeat traffic.
+        val limit = requestedLimit.coerceIn(1, 24)
         val rows = mutableListOf<GalleryRow>()
         runCatching {
             val projection = arrayOf(
@@ -152,7 +154,7 @@ object PhoneGalleryBridge {
     private fun loadThumbnail(context: Context, row: GalleryRow): String {
         val bitmap = runCatching {
             if (Build.VERSION.SDK_INT >= 29) {
-                context.contentResolver.loadThumbnail(row.uri, Size(180, 180), null)
+                context.contentResolver.loadThumbnail(row.uri, Size(128, 128), null)
             } else {
                 @Suppress("DEPRECATION")
                 MediaStore.Images.Thumbnails.getThumbnail(
@@ -165,7 +167,7 @@ object PhoneGalleryBridge {
         }.getOrNull() ?: return ""
         return runCatching {
             val output = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 56, output)
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 45, output)
             Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP)
         }.getOrDefault("").also { if (!bitmap.isRecycled) bitmap.recycle() }
     }

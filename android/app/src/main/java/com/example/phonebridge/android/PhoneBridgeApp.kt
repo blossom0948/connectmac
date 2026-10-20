@@ -104,7 +104,7 @@ fun PhoneBridgeApp(
     phonePermissionGranted: Boolean,
     onScan: () -> Unit,
     onReconnect: () -> Unit,
-    onEnsureConnection: () -> Unit,
+    onOpenBatterySettings: () -> Unit,
     onPickPhotos: () -> Unit,
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
@@ -126,7 +126,6 @@ fun PhoneBridgeApp(
     var showUnpairConfirmation by remember { mutableStateOf(false) }
     val connected = linkStatus.startsWith("Mac에 연결됨")
     fun selectTab(tab: PhoneBridgeTab) {
-        if (selectedTab != tab) onEnsureConnection()
         selectedTab = tab
     }
 
@@ -194,6 +193,7 @@ fun PhoneBridgeApp(
                     onRequestCallPermission = onRequestCallPermission,
                     onRequestGalleryPermission = onRequestGalleryPermission,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    onOpenBatterySettings = onOpenBatterySettings,
                     onUpdateAction = { onUpdateAction(updateState) },
                     onExportDiagnostics = onExportDiagnostics,
                     onUnpair = { showUnpairConfirmation = true },
@@ -561,6 +561,7 @@ private fun SettingsTab(
     onRequestCallPermission: () -> Unit,
     onRequestGalleryPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenBatterySettings: () -> Unit,
     onUpdateAction: () -> Unit,
     onExportDiagnostics: () -> Unit,
     onUnpair: () -> Unit,
@@ -574,6 +575,28 @@ private fun SettingsTab(
             Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Text("설정", fontSize = 25.sp, fontWeight = FontWeight.Bold)
                 Text("원하는 기능만 켜서 사용하세요", fontSize = 15.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        item {
+            PhoneBridgeSurface(Modifier.fillMaxWidth()) {
+                Row(
+                    Modifier.fillMaxWidth().clickable(onClick = onOpenBatterySettings)
+                        .padding(horizontal = 17.dp, vertical = 15.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(Icons.Outlined.Settings, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("백그라운드 연결", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "배터리 설정에서 PhoneBridge를 ‘제한 없음’으로 두면 절전 중 연결이 끊기는 일을 줄일 수 있습니다.",
+                            fontSize = 13.sp,
+                            lineHeight = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Icon(Icons.Outlined.ChevronRight, contentDescription = "앱 배터리 설정 열기", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
         item {

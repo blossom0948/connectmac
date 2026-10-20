@@ -99,7 +99,6 @@ class LinkService : Service() {
         private const val SERVICE_TYPE = "_phonebridge._tcp."
         private const val HEARTBEAT_INTERVAL_MS = 20_000L
         private const val HEARTBEAT_TIMEOUT_MS = 90_000L
-        private const val CONNECTION_PROBE_TIMEOUT_MS = 8_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
         private val fileTransferLock = Any()
         private val transferMonitor = Object()
@@ -421,8 +420,9 @@ class LinkService : Service() {
             stopScreenMirror(notifyMac = true)
             return START_STICKY
         }
+        // Activity resume may ask whether the service needs recovery. Never probe or tear down
+        // a healthy session in response to UI navigation; the normal heartbeat owns health checks.
         if (intent?.action == ACTION_CHECK_CONNECTION && isConnected()) {
-            checkConnectionHealth()
             return START_STICKY
         }
         val startProjection = intent?.action == ACTION_START_SCREEN_MIRROR
@@ -1241,19 +1241,6 @@ class LinkService : Service() {
                 if (!isConnected()) startDiscovery(pairing.secret)
             }, delay)
         }
-    }
-
-    /** A navigation tap probes the existing socket; an unresponsive peer is dropped and rediscovered. */
-    private fun checkConnectionHealth() {
-        val session = activeSession ?: return
-        if (!session.heartbeatSupported) return
-        val sequenceAtPing = serverMessageSequence
-        sendEvent(this, JSONObject().put("kind", "heartbeat_ping").put("timestamp", System.currentTimeMillis() / 1000.0))
-        retryHandler.postDelayed({
-            if (activeSession === session && serverMessageSequence == sequenceAtPing) {
-                handleConnectionLoss(session.socket, "Mac 응답이 없어 다시 연결하는 중…")
-            }
-        }, CONNECTION_PROBE_TIMEOUT_MS)
     }
 
     private fun stopDiscovery() {
