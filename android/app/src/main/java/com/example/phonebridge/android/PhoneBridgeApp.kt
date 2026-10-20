@@ -78,6 +78,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.phonebridge.android.link.ReceivedFileItem
+import com.example.phonebridge.android.link.TransferProgress
+import com.example.phonebridge.android.link.PhoneBridgeDiagnostic
 import com.example.phonebridge.android.update.PhoneBridgeUpdateState
 
 private enum class PhoneBridgeTab(val title: String, val icon: ImageVector) {
@@ -92,6 +94,8 @@ fun PhoneBridgeApp(
     systemBarPadding: PaddingValues,
     linkStatus: String,
     receivedFiles: List<ReceivedFileItem>,
+    transfers: List<TransferProgress>,
+    diagnostics: List<PhoneBridgeDiagnostic>,
     screenShareStatus: String,
     galleryAccessGranted: Boolean,
     remoteControlEnabled: Boolean,
@@ -107,6 +111,8 @@ fun PhoneBridgeApp(
     onOpenReceivedFile: (ReceivedFileItem) -> Unit,
     onShareReceivedFile: (ReceivedFileItem) -> Unit,
     onDeleteReceivedFile: (ReceivedFileItem) -> Unit,
+    onCancelTransfer: (String) -> Unit,
+    onExportDiagnostics: () -> Unit,
     onStartScreenShare: () -> Unit,
     onStopScreenShare: () -> Unit,
     onOpenNotificationSettings: () -> Unit,
@@ -168,15 +174,18 @@ fun PhoneBridgeApp(
                 PhoneBridgeTab.Transfer -> TransferTab(
                     connected = connected,
                     receivedFiles = receivedFiles,
+                    transfers = transfers,
                     onPickPhotos = onPickPhotos,
                     onPickFile = onPickFile,
                     onSendClipboard = onSendClipboard,
                     onOpenReceivedFile = onOpenReceivedFile,
                     onShareReceivedFile = onShareReceivedFile,
                     onDeleteReceivedFile = onDeleteReceivedFile,
+                    onCancelTransfer = onCancelTransfer,
                 )
                 PhoneBridgeTab.Settings -> SettingsTab(
                     updateState = updateState,
+                    diagnostics = diagnostics,
                     notificationAccessGranted = notificationAccessGranted,
                     phonePermissionGranted = phonePermissionGranted,
                     galleryAccessGranted = galleryAccessGranted,
@@ -186,6 +195,7 @@ fun PhoneBridgeApp(
                     onRequestGalleryPermission = onRequestGalleryPermission,
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                     onUpdateAction = { onUpdateAction(updateState) },
+                    onExportDiagnostics = onExportDiagnostics,
                     onUnpair = { showUnpairConfirmation = true },
                 )
             }
@@ -353,12 +363,14 @@ private fun ConnectionTab(
 private fun TransferTab(
     connected: Boolean,
     receivedFiles: List<ReceivedFileItem>,
+    transfers: List<TransferProgress>,
     onPickPhotos: () -> Unit,
     onPickFile: () -> Unit,
     onSendClipboard: () -> Unit,
     onOpenReceivedFile: (ReceivedFileItem) -> Unit,
     onShareReceivedFile: (ReceivedFileItem) -> Unit,
     onDeleteReceivedFile: (ReceivedFileItem) -> Unit,
+    onCancelTransfer: (String) -> Unit,
 ) {
     var selectedFilter by rememberSaveable { mutableStateOf("모두") }
     var pendingDelete by remember { mutableStateOf<ReceivedFileItem?>(null) }
@@ -401,6 +413,44 @@ private fun TransferTab(
                         )
                     }
                     Text("선택한 항목만 전송합니다. 최대 100 MB", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+        if (transfers.isNotEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("전송 상태", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.weight(1f))
+                        Text("${transfers.count { it.status == "전송 중" || it.status == "이어받기 대기" }}개 진행 중", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    transfers.take(5).forEach { transfer ->
+                        PhoneBridgeSurface(Modifier.fillMaxWidth()) {
+                            Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                        Text(transfer.name, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        Text("${transfer.direction} · ${transfer.status} · ${transfer.detail}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    if (transfer.status == "전송 중" || transfer.status == "이어받기 대기") {
+                                        TextButton(onClick = { onCancelTransfer(transfer.id) }) { Text("취소", color = MaterialTheme.colorScheme.error) }
+                                    }
+                                }
+                                val fraction = if (transfer.totalBytes > 0L) {
+                                    (transfer.transferredBytes.toFloat() / transfer.totalBytes.toFloat()).coerceIn(0f, 1f)
+                                } else 0f
+                                androidx.compose.material3.LinearProgressIndicator(
+                                    progress = { fraction },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                                Text(
+                                    "${android.text.format.Formatter.formatFileSize(androidx.compose.ui.platform.LocalContext.current, transfer.transferredBytes)} / ${android.text.format.Formatter.formatFileSize(androidx.compose.ui.platform.LocalContext.current, transfer.totalBytes)}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -502,6 +552,7 @@ private fun TransferTab(
 @Composable
 private fun SettingsTab(
     updateState: PhoneBridgeUpdateState,
+    diagnostics: List<PhoneBridgeDiagnostic>,
     notificationAccessGranted: Boolean,
     phonePermissionGranted: Boolean,
     galleryAccessGranted: Boolean,
@@ -511,6 +562,7 @@ private fun SettingsTab(
     onRequestGalleryPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onUpdateAction: () -> Unit,
+    onExportDiagnostics: () -> Unit,
     onUnpair: () -> Unit,
 ) {
     LazyColumn(
@@ -581,6 +633,23 @@ private fun SettingsTab(
                         enabled = updateState !is PhoneBridgeUpdateState.Checking &&
                             updateState !is PhoneBridgeUpdateState.Downloading &&
                             updateState !is PhoneBridgeUpdateState.AwaitingSystemConfirmation,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+        item {
+            PhoneBridgeSurface(Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth().padding(17.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("연결 진단", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("최근 연결·전송 오류 기록 ${diagnostics.size}개 · 알림 내용, 전화번호, 파일 이름은 저장하지 않습니다.", fontSize = 13.sp, lineHeight = 18.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    diagnostics.take(3).forEach { entry ->
+                        Text("${android.text.format.DateFormat.format("HH:mm:ss", entry.timestamp)} · ${entry.category}: ${entry.detail}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    MotionOutlinedButton(
+                        text = "진단 기록 공유",
+                        icon = Icons.Outlined.Share,
+                        onClick = onExportDiagnostics,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }

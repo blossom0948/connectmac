@@ -57,6 +57,7 @@ import com.example.phonebridge.android.link.ConnectionState
 import com.example.phonebridge.android.link.LinkService
 import com.example.phonebridge.android.link.PairingStore
 import com.example.phonebridge.android.link.PairingPayload
+import com.example.phonebridge.android.link.PhoneBridgeDiagnostics
 import com.example.phonebridge.android.link.ReceivedFileItem
 import com.example.phonebridge.android.link.PhoneGalleryBridge
 import com.example.phonebridge.android.remote.PhoneRemoteControlService
@@ -171,6 +172,8 @@ class MainActivity : ComponentActivity() {
         setContent {
             val linkStatus by ConnectionState.status.collectAsState()
             val receivedFiles by ConnectionState.receivedFiles.collectAsState()
+            val transfers by ConnectionState.transfers.collectAsState()
+            val diagnostics by ConnectionState.diagnostics.collectAsState()
             val screenShareStatus by ConnectionState.screenShareStatus.collectAsState()
             val updateState by updateManager.state.collectAsState()
             PhoneBridgeTheme {
@@ -180,6 +183,8 @@ class MainActivity : ComponentActivity() {
                         systemBarPadding = systemBarPadding,
                         linkStatus = linkStatus,
                         receivedFiles = receivedFiles,
+                        transfers = transfers,
+                        diagnostics = diagnostics,
                         screenShareStatus = screenShareStatus,
                         galleryAccessGranted = galleryAccessGranted,
                         remoteControlEnabled = remoteControlEnabled,
@@ -195,6 +200,8 @@ class MainActivity : ComponentActivity() {
                         onOpenReceivedFile = ::openReceivedFile,
                         onShareReceivedFile = ::shareReceivedFile,
                         onDeleteReceivedFile = ::deleteReceivedFile,
+                        onCancelTransfer = LinkService::cancelFileTransfer,
+                        onExportDiagnostics = ::shareDiagnostics,
                         onStartScreenShare = ::requestScreenMirror,
                         onStopScreenShare = ::stopScreenMirror,
                         onOpenNotificationSettings = { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
@@ -445,6 +452,15 @@ class MainActivity : ComponentActivity() {
         PairingStore.clear(this)
         pairedName = null
         ConnectionState.status.value = "페어링되지 않음"
+    }
+
+    private fun shareDiagnostics() {
+        val report = PhoneBridgeDiagnostics.exportText(BuildConfig.VERSION_NAME, ConnectionState.status.value)
+        val intent = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_SUBJECT, "PhoneBridge Android 진단 기록")
+            .putExtra(Intent.EXTRA_TEXT, report)
+        startActivity(Intent.createChooser(intent, "진단 기록 공유"))
     }
 
     private fun hasPhonePermission(): Boolean = Build.VERSION.SDK_INT < 23 || checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == android.content.pm.PackageManager.PERMISSION_GRANTED

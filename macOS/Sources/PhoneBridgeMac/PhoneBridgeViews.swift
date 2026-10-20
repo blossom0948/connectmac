@@ -772,19 +772,30 @@ private struct FileTransferView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     ForEach(model.outgoingTransfers.prefix(6)) { transfer in
-                        HStack(spacing: 11) {
-                            Image(systemName: transferIcon(for: transfer.status))
-                                .foregroundStyle(transferColor(for: transfer.status))
-                                .frame(width: 24)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(transfer.name).font(.subheadline.weight(.medium)).lineLimit(1)
-                                Text(transfer.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 11) {
+                                Image(systemName: transferIcon(for: transfer.status))
+                                    .foregroundStyle(transferColor(for: transfer.status))
+                                    .frame(width: 24)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(transfer.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                                    Text(transfer.detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer(minLength: 6)
+                                Text(transfer.status.title).font(.caption.weight(.medium)).foregroundStyle(transferColor(for: transfer.status))
+                                if transfer.status == .failed || transfer.status == .paused {
+                                    Button(transfer.status == .paused ? "이어받기" : "다시 시도") { model.retryFileTransfer(transfer.id) }
+                                        .buttonStyle(.bordered).phoneBridgeHover().controlSize(.small)
+                                }
+                                if transfer.status == .queued || transfer.status == .preparing || transfer.status == .sending || transfer.status == .paused {
+                                    Button("취소") { model.cancelFileTransfer(transfer.id) }
+                                        .buttonStyle(.bordered).phoneBridgeHover().controlSize(.small)
+                                }
                             }
-                            Spacer(minLength: 6)
-                            Text(transfer.status.title).font(.caption.weight(.medium)).foregroundStyle(transferColor(for: transfer.status))
-                            if transfer.status == .failed {
-                                Button("다시 시도") { model.retryFileTransfer(transfer.id) }
-                                    .buttonStyle(.bordered).phoneBridgeHover().controlSize(.small)
+                            if transfer.size > 0 {
+                                ProgressView(value: Double(transfer.transferredBytes), total: Double(transfer.size))
+                                Text("\(ByteCountFormatter.string(fromByteCount: transfer.transferredBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: transfer.size, countStyle: .file))")
+                                    .font(.caption2).foregroundStyle(.tertiary)
                             }
                         }
                         .padding(.horizontal, 12)
@@ -793,6 +804,36 @@ private struct FileTransferView: View {
                     }
                     if model.outgoingTransfers.count > 6 {
                         Text("최근 6개 전송을 표시합니다.").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+                .padding(14)
+                .phoneBridgeSurface(cornerRadius: 17)
+            }
+            if !model.incomingTransferProgress.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("받는 파일 진행 상황").font(.headline)
+                    ForEach(model.incomingTransferProgress.prefix(5)) { transfer in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(transfer.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                                    Text("\(transfer.direction) · \(transfer.detail)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                Spacer()
+                                Text(transfer.status).font(.caption.weight(.medium)).foregroundStyle(transfer.status == "실패" ? .red : .secondary)
+                                if transfer.status == "전송 중" || transfer.status == "이어받기 대기" {
+                                    Button("취소") { model.cancelIncomingFileTransfer(transfer.id) }
+                                        .buttonStyle(.bordered).phoneBridgeHover().controlSize(.small)
+                                }
+                            }
+                            if transfer.totalBytes > 0 {
+                                ProgressView(value: Double(transfer.transferredBytes), total: Double(transfer.totalBytes))
+                                Text("\(ByteCountFormatter.string(fromByteCount: transfer.transferredBytes, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: transfer.totalBytes, countStyle: .file))")
+                                    .font(.caption2).foregroundStyle(.tertiary)
+                            }
+                        }
+                        .padding(11)
+                        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     }
                 }
                 .padding(14)
@@ -847,15 +888,18 @@ private struct FileTransferView: View {
         case .queued: "clock"
         case .preparing: "doc.badge.ellipsis"
         case .sending: "arrow.up.circle"
+        case .paused: "pause.circle"
         case .completed: "checkmark.circle.fill"
         case .failed: "exclamationmark.triangle.fill"
+        case .cancelled: "xmark.circle"
         }
     }
 
     private func transferColor(for status: OutgoingTransferStatus) -> Color {
         switch status {
-        case .queued, .preparing: .secondary
+        case .queued, .preparing, .cancelled: .secondary
         case .sending: .blue
+        case .paused: .orange
         case .completed: .green
         case .failed: .orange
         }
@@ -1364,6 +1408,20 @@ private struct SettingsView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(!updater.canCheckForUpdates)
                         .phoneBridgeHover()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 4)
+            }
+            GroupBox("연결 진단") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("최근 연결·파일 전송 기록 \(model.diagnostics.count)개. 알림 내용, 전화번호, 파일 이름은 포함하지 않습니다.")
+                        .foregroundStyle(.secondary)
+                    ForEach(model.diagnostics.prefix(5)) { entry in
+                        Text("\(entry.timestamp.formatted(date: .omitted, time: .standard)) · \(entry.category): \(entry.detail)")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Button("진단 기록 내보내기…") { model.exportDiagnostics() }
+                        .buttonStyle(.bordered).phoneBridgeHover()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 4)

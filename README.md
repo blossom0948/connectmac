@@ -17,10 +17,12 @@ Mac과 Android 휴대폰을 같은 로컬 Wi‑Fi에서 연결하는 앱입니�
 - Android의 활성 미디어 세션을 이전/재생/일시 정지/다음으로 제어
 - Mac 갤러리에서 Android 사진을 페이지별로 둘러보고 원본 받기. Android에서 허용한 사진만 표시
 - 사진과 파일 양방향 전송, Mac 파일 끌어놓기와 Android 시스템 공유 메뉴 전송, Mac에서 수신 파일 저장 위치 선택
-- Mac 파일 전송 대기열에서 휴대폰 저장 여부 확인, 실패 이유 표시와 재시도. 한 번에 하나씩 보내 수신이 겹치는 상황을 줄임
+- 양방향 파일 전송 진행률과 취소, Wi‑Fi 재연결 뒤 같은 전송 ID·저장 지점으로 이어받기. 한 번에 하나씩 전송하고 수신 쪽의 저장 확인을 받은 뒤 완료 처리
+- Mac 파일 전송 대기열에서 실패 이유 표시와 재시도, Android 전송 화면에서 진행 중인 항목 취소
 - Mac 갤러리에서 여러 사진을 선택해 순서대로 내려받기. 이미 대기 중이거나 받는 중인 사진은 다시 추가하지 않음
 - Android에서 Mac으로 받은 파일을 전체·사진·파일로 분류하고 열기, 다른 앱 공유, 확인 후 삭제
-- 연결이 끊긴 뒤 남은 미완성 전송 조각을 정리하고, 반복 용량 계산을 줄여 큰 전송의 처리 부담을 낮춤
+- 전송 조각은 앱 전용 저장 공간에 임시 저장합니다. Mac과 Android는 연결이 돌아오면 확인된 조각 다음부터 이어받고, 오래된 미완성 조각을 정리합니다.
+- Mac 설정과 Android 설정에서 개인정보를 제외한 연결·전송 진단 기록을 보고 내보내기
 - Mac에서 요청하면 연결된 Android 휴대폰에서 찾기 알림음 재생
 - Android 시스템 동의로 시작하는 화면 미리보기. 별도 접근성 권한을 켜면 Mac에서 탭·스와이프와 뒤로·홈·최근 앱 조작
 - 텍스트 클립보드 양방향 전송. Mac에서 전송하거나 Android 앱에서 보내기를 눌러야 하며, Mac은 수신 텍스트를 사용자가 눌러 복사
@@ -50,11 +52,7 @@ PhoneBridge는 일반 앱에 공개된 API만 사용합니다. 이 제한은 비
 
 [PhoneBridge-macOS.dmg](https://github.com/blossom0948/connectmac/releases/latest/download/PhoneBridge-macOS.dmg)을 내려받아 더블클릭합니다. 열린 창에서 **PhoneBridge.app**을 **Applications** 폴더로 끌어 놓은 뒤 앱을 실행하세요. macOS가 개발자를 확인할 수 없다고 막으면 Finder에서 앱을 Control-클릭해 **열기**를 선택합니다.
 
-이 개발용 빌드는 ad hoc 서명만 되어 있으며 Apple Developer ID 공증은 받지 않았습니다. 공식 Release에서 받은 앱인데도 macOS가 “손상되어 열 수 없습니다”라고 표시하면 터미널에서 격리 속성을 제거한 뒤 다시 여세요.
-
-```sh
-sudo xattr -dr com.apple.quarantine /Applications/PhoneBridge.app
-```
+현재 공개된 v0.3.5 DMG는 ad hoc 서명이라 Apple 공증을 받지 않았습니다. macOS가 차단한다면 격리 속성을 제거해 실행하지 마세요. v0.3.6 배포 스크립트는 Developer ID 서명과 Apple 공증을 마쳐야만 배포 패키지를 만들도록 변경했습니다. 이 자격 증명이 설정되기 전까지 새로 빌드한 DMG는 공식 배포본으로 만들지 않습니다.
 
 소스에서 직접 빌드하려면 저장소 폴더에서 아래 명령을 실행합니다.
 
@@ -95,10 +93,14 @@ cd android
 Mac과 Android의 버전을 각각 `macOS/Info.plist`와 `android/app/build.gradle.kts`에서 같은 값으로 올리고 Android `versionCode`도 증가시킨 뒤 다음 명령을 실행합니다.
 
 ```sh
-scripts/package-release.sh 0.3.5
+PHONEBRIDGE_DEVELOPER_ID="Developer ID Application: Your Name (TEAMID)" \
+PHONEBRIDGE_NOTARY_PROFILE="PhoneBridge-Notary" \
+scripts/package-release.sh 0.3.6
 ```
 
-이 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.5/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.5` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
+먼저 Apple Developer ID Application 인증서를 Mac 키체인에 설치하고 `xcrun notarytool store-credentials PhoneBridge-Notary --apple-id <Apple ID> --team-id <Team ID> --password <앱 암호>`를 한 번 실행해 공증 자격 증명을 키체인에 저장합니다. 스크립트는 앱을 Hardened Runtime으로 서명하고, DMG를 Apple에 공증 요청한 뒤 공증 티켓을 DMG에 첨부합니다. 서명 신원과 공증 프로필이 없으면 배포 패키지 생성을 중단합니다. 로컬에서 공증 없이 개발용 패키지를 만들 때만 `PHONEBRIDGE_ALLOW_UNNOTARIZED=1`을 지정합니다.
+
+패키지 명령은 DMG, APK, Sparkle `appcast.xml`, Android `phonebridge-update.json`을 `dist/releases/v0.3.6/`에 만듭니다. 또한 안정적인 업데이트 주소에 쓸 `updates/appcast.xml`과 `updates/phonebridge-update.json`을 갱신합니다. 이 두 파일을 `main`에 올린 뒤 나머지 파일을 같은 이름으로 GitHub의 `v0.3.6` 릴리스에 올리면 됩니다. Android 업데이트가 기존 설치 위에 적용되려면 릴리스 서명 키가 계속 같아야 합니다. 스크립트는 키가 바뀌면 배포용 파일 생성을 중단합니다.
 
 ## 처음 연결하기
 

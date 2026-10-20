@@ -20,6 +20,7 @@ struct PhoneEvent: Identifiable, Codable {
     let canReply: Bool?
     let transferIndex: Int?
     let transferCount: Int?
+    let nextIndex: Int?
     let payload: String?
     let actions: [PhoneEventAction]?
     let success: Bool?
@@ -31,7 +32,7 @@ struct PhoneEvent: Identifiable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case eventId, kind, title, text, source, battery, callState, timestamp
-        case canReply, transferIndex, transferCount, payload, actions, success, size, pageOffset, hasMore
+        case canReply, transferIndex, transferCount, nextIndex, payload, actions, success, size, pageOffset, hasMore
     }
 }
 
@@ -52,16 +53,20 @@ enum OutgoingTransferStatus: Equatable {
     case queued
     case preparing
     case sending
+    case paused
     case completed
     case failed
+    case cancelled
 
     var title: String {
         switch self {
         case .queued: "대기 중"
         case .preparing: "준비 중"
         case .sending: "전송 중"
+        case .paused: "연결 대기"
         case .completed: "휴대폰에 저장됨"
         case .failed: "전송 실패"
+        case .cancelled: "취소됨"
         }
     }
 }
@@ -71,8 +76,32 @@ struct OutgoingTransfer: Identifiable {
     let name: String
     let sourceURL: URL
     var size: Int64
+    var transferredBytes: Int64
     var status: OutgoingTransferStatus
     var detail: String
+}
+
+struct PhoneBridgeTransferProgress: Identifiable {
+    let id: String
+    let name: String
+    let direction: String
+    let totalBytes: Int64
+    let transferredBytes: Int64
+    let status: String
+    let detail: String
+}
+
+struct PhoneBridgeDiagnosticEntry: Identifiable, Codable {
+    let id: UUID
+    let timestamp: Date
+    let category: String
+    let detail: String
+}
+
+private struct PhoneBridgeDiagnosticReport: Codable {
+    let appVersion: String
+    let connected: Bool
+    let entries: [PhoneBridgeDiagnosticEntry]
 }
 
 struct PhoneGalleryItem: Identifiable {
@@ -97,6 +126,17 @@ private struct IncomingTransfer {
     var chunks: [Int: Data] = [:]
 }
 
+private struct ResumableIncomingTransfer: Codable {
+    let id: String
+    let name: String
+    let contentType: String
+    let size: Int64
+    let count: Int
+    var nextIndex: Int
+    var partPath: String
+    var completed: Bool? = false
+}
+
 struct PairedDevice: Codable {
     let name: String
     let secret: Data
@@ -119,6 +159,8 @@ final class PhoneBridgeModel: ObservableObject {
     @Published var pairingExpiresAt: Date?
     @Published var receivedFiles: [ReceivedFile] = []
     @Published var outgoingTransfers: [OutgoingTransfer] = []
+    @Published var incomingTransferProgress: [PhoneBridgeTransferProgress] = []
+    @Published private(set) var diagnostics: [PhoneBridgeDiagnosticEntry] = []
     @Published var actionMessage: String?
     @Published var screenFrame: NSImage?
     @Published var phoneClipboardText: String?
@@ -132,10 +174,14 @@ final class PhoneBridgeModel: ObservableObject {
 
     private let server = MacLinkServer()
     private var incomingTransfers: [String: IncomingTransfer] = [:]
+    private var resumableIncomingTransfers: [String: ResumableIncomingTransfer] = [:]
     private var galleryDownloadQueue: [PhoneGalleryItem] = []
     private var activeGalleryDownload: (transferID: String, item: PhoneGalleryItem)?
     private var galleryTransferToAsset: [String: String] = [:]
     private var activeOutgoingTransferID: String?
+    private var activeOutgoingTransferData: Data?
+    private var activeOutgoingTransferChunkSize = 24 * 1_024
+    private var peerSupportsTransferControl = false
 
     init() {
         let paired = PairKeyStore.load()
@@ -144,12 +190,21 @@ final class PhoneBridgeModel: ObservableObject {
         localAddress = NetworkAddress.localIPv4() ?? ""
         server.onStatus = { [weak self] status, connected in
             Task { @MainActor in
+                let connectionChanged = self?.isConnected != connected
                 self?.status = status
                 self?.isConnected = connected
+                if connectionChanged {
+                    self?.recordDiagnostic("연결", connected ? "Mac과 휴대폰이 연결되었습니다." : "연결이 끊겨 자동 재연결을 시작했습니다.")
+                }
                 if !connected {
                     self?.screenFrame = nil
                     self?.galleryIsLoading = false
                     self?.incomingTransfers.removeAll()
+                    self?.resumableIncomingTransfers.values.forEach { transfer in
+                        self?.updateIncomingTransferProgress(transfer,
+                            bytes: min(transfer.size, Int64(transfer.nextIndex * 24 * 1_024)),
+                            status: "이어받기 대기", detail: "연결되면 파일 받기를 이어갑니다.")
+                    }
                     if let active = self?.activeGalleryDownload {
                         self?.galleryDownloadQueue.insert(active.item, at: 0)
                         self?.activeGalleryDownload = nil
@@ -158,8 +213,9 @@ final class PhoneBridgeModel: ObservableObject {
                         self?.galleryStatus = "연결이 끊겨 사진 전송을 대기 중입니다. 다시 연결되면 이어집니다."
                     }
                     if let transferID = self?.activeOutgoingTransferID {
-                        self?.updateOutgoingTransfer(transferID, status: .failed, detail: "연결이 끊겨 완료 여부를 확인하지 못했습니다.")
+                        self?.updateOutgoingTransfer(transferID, status: .paused, detail: "연결이 끊겼습니다. 재연결 후 이어서 전송합니다.")
                         self?.activeOutgoingTransferID = nil
+                        self?.activeOutgoingTransferData = nil
                     }
                 } else {
                     self?.startNextGalleryDownload()
@@ -179,7 +235,12 @@ final class PhoneBridgeModel: ObservableObject {
         server.onEvent = { [weak self] event in
             Task { @MainActor in self?.receive(event) }
         }
+        server.onCapabilities = { [weak self] capabilities in
+            Task { @MainActor in self?.peerSupportsTransferControl = capabilities.contains("transfer-control-v1") }
+        }
         server.start()
+        cleanTransferStorage()
+        restoreCompletedIncomingTransfers()
         if paired == nil {
             createPairingCode()
         }
@@ -236,6 +297,7 @@ final class PhoneBridgeModel: ObservableObject {
         galleryDownloadingAssetIDs.removeAll()
         outgoingTransfers.removeAll()
         activeOutgoingTransferID = nil
+        activeOutgoingTransferData = nil
         createPairingCode()
         status = "Android 앱에서 QR 코드를 스캔하세요"
     }
@@ -452,7 +514,7 @@ final class PhoneBridgeModel: ObservableObject {
         guard isConnected else { actionMessage = "전송하려면 휴대폰을 연결하세요."; return }
         let newTransfers = urls.map { url in
             OutgoingTransfer(id: UUID().uuidString, name: url.lastPathComponent, sourceURL: url,
-                size: 0, status: .queued, detail: "전송 차례를 기다립니다.")
+                size: 0, transferredBytes: 0, status: .queued, detail: "전송 차례를 기다립니다.")
         }
         outgoingTransfers.insert(contentsOf: newTransfers, at: 0)
         actionMessage = "파일 \(newTransfers.count)개를 전송 대기열에 추가했습니다."
@@ -460,13 +522,50 @@ final class PhoneBridgeModel: ObservableObject {
     }
 
     func retryFileTransfer(_ id: String) {
-        guard let transfer = outgoingTransfers.first(where: { $0.id == id }), transfer.status == .failed else { return }
-        sendFiles([transfer.sourceURL])
+        guard let index = outgoingTransfers.firstIndex(where: { $0.id == id }),
+              outgoingTransfers[index].status == .failed || outgoingTransfers[index].status == .paused else { return }
+        outgoingTransfers[index].status = .queued
+        outgoingTransfers[index].transferredBytes = 0
+        outgoingTransfers[index].detail = "이어받기를 기다립니다."
+        startNextOutgoingTransfer()
+    }
+
+    func cancelFileTransfer(_ id: String) {
+        guard let transfer = outgoingTransfers.first(where: { $0.id == id }) else { return }
+        if activeOutgoingTransferID == id || transfer.status == .queued || transfer.status == .paused {
+            server.sendSecure(["kind": "file_cancel", "eventId": id])
+        }
+        if activeOutgoingTransferID == id {
+            activeOutgoingTransferID = nil
+            activeOutgoingTransferData = nil
+        }
+        updateOutgoingTransfer(id, status: .cancelled, detail: "전송을 취소했습니다.")
+        recordDiagnostic("전송", "Mac에서 파일 전송을 취소했습니다.")
+        startNextOutgoingTransfer()
+    }
+
+    func cancelIncomingFileTransfer(_ id: String) {
+        guard let transfer = incomingTransferProgress.first(where: { $0.id == id }),
+              transfer.status == "전송 중" || transfer.status == "이어받기 대기" else { return }
+        server.sendSecure(["kind": "file_cancel", "eventId": id])
+        if let resumable = resumableIncomingTransfers[id] {
+            cancelResumableIncomingTransfer(id, notifyPeer: false)
+            updateIncomingTransferProgress(resumable,
+                bytes: min(resumable.size, Int64(resumable.nextIndex * 24 * 1_024)),
+                status: "취소됨", detail: "받기를 취소했습니다.")
+        } else {
+            incomingTransfers.removeValue(forKey: id)
+            incomingTransferProgress.removeAll { $0.id == id }
+            incomingTransferProgress.insert(PhoneBridgeTransferProgress(id: id, name: transfer.name,
+                direction: transfer.direction, totalBytes: transfer.totalBytes,
+                transferredBytes: transfer.transferredBytes, status: "취소됨", detail: "받기를 취소했습니다."), at: 0)
+        }
+        recordDiagnostic("전송", "받는 파일 전송을 취소했습니다.")
     }
 
     private func startNextOutgoingTransfer() {
         guard isConnected, activeOutgoingTransferID == nil,
-              let index = outgoingTransfers.firstIndex(where: { $0.status == .queued }) else { return }
+              let index = outgoingTransfers.firstIndex(where: { $0.status == .queued || $0.status == .paused }) else { return }
         let transfer = outgoingTransfers[index]
         activeOutgoingTransferID = transfer.id
         updateOutgoingTransfer(transfer.id, status: .preparing, detail: "파일을 확인하고 있습니다.")
@@ -486,17 +585,29 @@ final class PhoneBridgeModel: ObservableObject {
                         return
                     }
                     self.updateOutgoingTransfer(transfer.id, status: .sending, size: Int64(data.count), detail: "휴대폰 저장을 기다리는 중입니다.")
-                    self.server.sendFile(
-                        name: transfer.name,
-                        contentType: UTType(filenameExtension: transfer.sourceURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
-                        data: data,
-                        transferId: transfer.id,
-                    )
+                    self.activeOutgoingTransferData = data
+                    self.activeOutgoingTransferChunkSize = 24 * 1_024
+                    self.recordDiagnostic("전송", "Mac에서 휴대폰으로 파일 전송을 시작했습니다.")
+                    if self.peerSupportsTransferControl {
+                        let count = max(1, (data.count + self.activeOutgoingTransferChunkSize - 1) / self.activeOutgoingTransferChunkSize)
+                        self.server.sendSecure([
+                            "kind": "file_start",
+                            "eventId": transfer.id,
+                            "title": transfer.name,
+                            "source": UTType(filenameExtension: transfer.sourceURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                            "size": data.count,
+                            "transferCount": count,
+                            "chunkSize": self.activeOutgoingTransferChunkSize,
+                        ])
+                    } else {
+                        self.sendLegacyOutgoingTransfer(transferID: transfer.id)
+                    }
                     Task { @MainActor [weak self] in
                         try? await Task.sleep(for: .seconds(300))
                         guard let self, self.activeOutgoingTransferID == transfer.id else { return }
                         self.updateOutgoingTransfer(transfer.id, status: .failed, detail: "휴대폰 응답이 없습니다. 연결을 확인하고 다시 시도하세요.")
                         self.activeOutgoingTransferID = nil
+                        self.activeOutgoingTransferData = nil
                         self.startNextOutgoingTransfer()
                     }
                 }
@@ -511,22 +622,79 @@ final class PhoneBridgeModel: ObservableObject {
         }
     }
 
-    private func updateOutgoingTransfer(_ id: String, status: OutgoingTransferStatus, size: Int64? = nil, detail: String) {
+    private func updateOutgoingTransfer(_ id: String, status: OutgoingTransferStatus, size: Int64? = nil, transferredBytes: Int64? = nil, detail: String) {
         guard let index = outgoingTransfers.firstIndex(where: { $0.id == id }) else { return }
         outgoingTransfers[index].status = status
         outgoingTransfers[index].detail = detail
         if let size { outgoingTransfers[index].size = size }
+        if let transferredBytes { outgoingTransfers[index].transferredBytes = transferredBytes }
         var keptHistory = 0
         outgoingTransfers = outgoingTransfers.filter { transfer in
             switch transfer.status {
             case .queued, .preparing, .sending:
                 return true
-            case .completed, .failed:
+            case .paused, .completed, .failed, .cancelled:
                 guard keptHistory < 30 else { return false }
                 keptHistory += 1
                 return true
             }
         }
+    }
+
+    private func sendLegacyOutgoingTransfer(transferID: String) {
+        guard activeOutgoingTransferID == transferID,
+              let transfer = outgoingTransfers.first(where: { $0.id == transferID }),
+              let data = activeOutgoingTransferData else { return }
+        let chunkSize = activeOutgoingTransferChunkSize
+        let count = max(1, (data.count + chunkSize - 1) / chunkSize)
+        for index in 0..<count {
+            guard activeOutgoingTransferID == transferID, isConnected else { return }
+            let lower = index * chunkSize
+            let upper = min(lower + chunkSize, data.count)
+            server.sendSecure([
+                "kind": "file_chunk", "eventId": transferID, "title": transfer.name,
+                "source": UTType(filenameExtension: transfer.sourceURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+                "transferIndex": index, "transferCount": count,
+                "payload": data.subdata(in: lower..<upper).base64EncodedString(),
+            ])
+            if index.isMultiple(of: 8) || index == count - 1 {
+                updateOutgoingTransfer(transferID, status: .sending, transferredBytes: Int64(upper), detail: "휴대폰으로 파일을 전송하고 있습니다.")
+            }
+        }
+    }
+
+    private func sendNextResumableChunk(transferID: String, nextIndex: Int) {
+        guard activeOutgoingTransferID == transferID, let data = activeOutgoingTransferData,
+              let transfer = outgoingTransfers.first(where: { $0.id == transferID }) else { return }
+        let chunkSize = activeOutgoingTransferChunkSize
+        let count = max(1, (data.count + chunkSize - 1) / chunkSize)
+        guard nextIndex >= 0, nextIndex <= count else {
+            finishOutgoingTransfer(transferID, success: false, detail: "휴대폰이 올바르지 않은 이어받기 위치를 보냈습니다.")
+            return
+        }
+        let bytesSent = min(data.count, nextIndex * chunkSize)
+        updateOutgoingTransfer(transferID, status: .sending, transferredBytes: Int64(bytesSent), detail: "휴대폰에 저장 중입니다.")
+        guard nextIndex < count else { return }
+        let lower = nextIndex * chunkSize
+        let upper = min(lower + chunkSize, data.count)
+        server.sendSecure([
+            "kind": "file_chunk", "eventId": transferID, "title": transfer.name,
+            "source": UTType(filenameExtension: transfer.sourceURL.pathExtension)?.preferredMIMEType ?? "application/octet-stream",
+            "transferIndex": nextIndex, "transferCount": count,
+            "payload": data.subdata(in: lower..<upper).base64EncodedString(),
+        ])
+    }
+
+    private func finishOutgoingTransfer(_ id: String, success: Bool, detail: String) {
+        let size = outgoingTransfers.first(where: { $0.id == id })?.size
+        updateOutgoingTransfer(id, status: success ? .completed : .failed,
+                               transferredBytes: success ? size : nil, detail: detail)
+        recordDiagnostic("전송", success ? "Mac에서 휴대폰으로 파일 전송이 완료되었습니다." : "Mac에서 휴대폰으로 파일 전송이 실패했습니다.")
+        if activeOutgoingTransferID == id {
+            activeOutgoingTransferID = nil
+            activeOutgoingTransferData = nil
+        }
+        startNextOutgoingTransfer()
     }
 
     func saveReceivedFile(_ file: ReceivedFile) {
@@ -555,6 +723,32 @@ final class PhoneBridgeModel: ObservableObject {
         } catch {
             actionMessage = "최근 활동을 내보내지 못했습니다: \(error.localizedDescription)"
         }
+    }
+
+    func exportDiagnostics() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "PhoneBridge-diagnostics.json"
+        panel.allowedContentTypes = [.json]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let report = PhoneBridgeDiagnosticReport(
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
+            connected: isConnected,
+            entries: diagnostics,
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            try encoder.encode(report).write(to: url, options: .atomic)
+            actionMessage = "진단 기록을 저장했습니다. 알림 내용, 전화번호, 파일 이름은 포함되지 않습니다."
+        } catch {
+            actionMessage = "진단 기록을 저장하지 못했습니다: \(error.localizedDescription)"
+        }
+    }
+
+    private func recordDiagnostic(_ category: String, _ detail: String) {
+        diagnostics.insert(PhoneBridgeDiagnosticEntry(id: UUID(), timestamp: Date(), category: category, detail: detail), at: 0)
+        diagnostics = Array(diagnostics.prefix(200))
     }
 
     private func receive(_ event: PhoneEvent) {
@@ -620,8 +814,51 @@ final class PhoneBridgeModel: ObservableObject {
             actionMessage = "휴대폰 클립보드 텍스트를 받았습니다. 복사 버튼을 누르면 Mac 클립보드에 저장됩니다."
             return
         }
+        if event.kind == "file_start" {
+            beginResumableIncomingTransfer(event)
+            return
+        }
+        if event.kind == "file_cancel" {
+            cancelResumableIncomingTransfer(event.eventId ?? "", notifyPeer: true)
+            return
+        }
+        if event.kind == "file_transfer_ready" {
+            guard let transferID = event.eventId, transferID == activeOutgoingTransferID else { return }
+            guard event.success != false else {
+                finishOutgoingTransfer(transferID, success: false, detail: event.text ?? "휴대폰이 전송을 준비하지 못했습니다.")
+                return
+            }
+            sendNextResumableChunk(transferID: transferID, nextIndex: event.nextIndex ?? 0)
+            return
+        }
+        if event.kind == "file_chunk_ack" {
+            guard let transferID = event.eventId, transferID == activeOutgoingTransferID else { return }
+            guard event.success != false else {
+                finishOutgoingTransfer(transferID, success: false, detail: event.text ?? "휴대폰에 파일 조각을 저장하지 못했습니다.")
+                return
+            }
+            sendNextResumableChunk(transferID: transferID, nextIndex: event.nextIndex ?? 0)
+            return
+        }
+        if event.kind == "file_cancelled" {
+            if let transferID = event.eventId,
+               let current = outgoingTransfers.first(where: { $0.id == transferID }),
+               current.status != .completed, current.status != .cancelled {
+                updateOutgoingTransfer(transferID, status: .cancelled, detail: "휴대폰에서 전송을 취소했습니다.")
+                if activeOutgoingTransferID == transferID {
+                    activeOutgoingTransferID = nil
+                    activeOutgoingTransferData = nil
+                }
+                startNextOutgoingTransfer()
+            }
+            return
+        }
         if event.kind == "file_chunk" {
+            if event.eventId.map({ resumableIncomingTransfers[$0] != nil }) == true {
+                receiveResumableFileChunk(event)
+            } else {
             receiveFileChunk(event)
+            }
             return
         }
         if event.kind == "file_received" {
@@ -631,14 +868,12 @@ final class PhoneBridgeModel: ObservableObject {
                 return
             }
             if event.success != false {
-                updateOutgoingTransfer(transferID, status: .completed, detail: "휴대폰에 안전하게 저장했습니다.")
+                finishOutgoingTransfer(transferID, success: true, detail: "휴대폰에 안전하게 저장했습니다.")
                 actionMessage = "Android 휴대폰에 \(event.title ?? "파일")을(를) 저장했습니다."
             } else {
-                updateOutgoingTransfer(transferID, status: .failed, detail: event.text ?? "휴대폰에 저장하지 못했습니다.")
+                finishOutgoingTransfer(transferID, success: false, detail: event.text ?? "휴대폰에 저장하지 못했습니다.")
                 actionMessage = event.text ?? "휴대폰에 파일을 저장하지 못했습니다."
             }
-            if activeOutgoingTransferID == transferID { activeOutgoingTransferID = nil }
-            startNextOutgoingTransfer()
             return
         }
         if event.kind == "dismiss_notification_result" {
@@ -668,6 +903,237 @@ final class PhoneBridgeModel: ObservableObject {
         }
     }
 
+    private func incomingTransferDirectory() throws -> URL {
+        let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            .appendingPathComponent("PhoneBridge/TransferParts", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    private func incomingTransferURLs(id: String) throws -> (part: URL, manifest: URL) {
+        let digest = SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined()
+        let directory = try incomingTransferDirectory()
+        return (directory.appendingPathComponent("\(digest).part"), directory.appendingPathComponent("\(digest).json"))
+    }
+
+    private func restoreCompletedIncomingTransfers() {
+        guard let directory = try? incomingTransferDirectory(),
+              let manifests = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let completed = manifests.filter { $0.pathExtension == "json" }
+            .sorted { lhs, rhs in
+                let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return left > right
+            }
+        var retainedBytes = 0
+        for manifestURL in completed {
+            guard let transfer = try? JSONDecoder().decode(ResumableIncomingTransfer.self, from: Data(contentsOf: manifestURL)),
+                  transfer.completed == true,
+                  let urls = try? incomingTransferURLs(id: transfer.id),
+                  let values = try? urls.part.resourceValues(forKeys: [.fileSizeKey]),
+                  let fileSize = values.fileSize, Int64(fileSize) == transfer.size,
+                  retainedBytes + fileSize <= 128 * 1_024 * 1_024,
+                  let data = try? Data(contentsOf: urls.part, options: .mappedIfSafe) else { continue }
+            retainedBytes += data.count
+            receivedFiles.append(ReceivedFile(id: transfer.id, name: transfer.name, contentType: transfer.contentType,
+                                              data: data, receivedAt: (try? urls.part.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? Date()))
+            incomingTransferProgress.append(PhoneBridgeTransferProgress(id: transfer.id, name: transfer.name,
+                direction: "휴대폰 → Mac", totalBytes: transfer.size, transferredBytes: transfer.size,
+                status: "완료", detail: "Mac에 안전하게 저장했습니다."))
+        }
+        incomingTransferProgress = Array(incomingTransferProgress.prefix(20))
+    }
+
+    private func cleanTransferStorage() {
+        guard let directory = try? incomingTransferDirectory(),
+              let manifests = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let ordered = manifests.filter { $0.pathExtension == "json" }.sorted { lhs, rhs in
+            let left = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let right = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return left > right
+        }
+        let now = Date()
+        let completedExpiry = now.addingTimeInterval(-30 * 24 * 60 * 60)
+        let incompleteExpiry = now.addingTimeInterval(-7 * 24 * 60 * 60)
+        var retainedCompletedBytes = 0
+        for manifestURL in ordered {
+            guard let transfer = try? JSONDecoder().decode(ResumableIncomingTransfer.self, from: Data(contentsOf: manifestURL)),
+                  let urls = try? incomingTransferURLs(id: transfer.id) else {
+                try? FileManager.default.removeItem(at: manifestURL)
+                continue
+            }
+            let modifiedAt = (try? manifestURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if transfer.completed == true {
+                let fileSize = (try? urls.part.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                if modifiedAt < completedExpiry || retainedCompletedBytes + fileSize > 128 * 1_024 * 1_024 {
+                    try? FileManager.default.removeItem(at: urls.part)
+                    try? FileManager.default.removeItem(at: manifestURL)
+                } else {
+                    retainedCompletedBytes += fileSize
+                }
+            } else if modifiedAt < incompleteExpiry {
+                try? FileManager.default.removeItem(at: urls.part)
+                try? FileManager.default.removeItem(at: manifestURL)
+            }
+        }
+    }
+
+    private func saveIncomingTransferManifest(_ transfer: ResumableIncomingTransfer, to url: URL) throws {
+        let encoder = JSONEncoder()
+        try encoder.encode(transfer).write(to: url, options: .atomic)
+    }
+
+    private func beginResumableIncomingTransfer(_ event: PhoneEvent) {
+        guard let id = event.eventId, !id.isEmpty, let size = event.size,
+              let count = event.transferCount, size >= 0, size <= 100 * 1_024 * 1_024,
+              count > 0, count <= 5_000 else {
+            if let id = event.eventId { server.sendSecure(["kind": "file_transfer_ready", "eventId": id, "success": false, "text": "파일 정보가 올바르지 않습니다."]) }
+            return
+        }
+        let chunkSize = 24 * 1_024
+        let expectedCount = max(1, (Int(size) + chunkSize - 1) / chunkSize)
+        guard count == expectedCount else {
+            server.sendSecure(["kind": "file_transfer_ready", "eventId": id, "success": false, "text": "파일 조각 정보가 올바르지 않습니다."])
+            return
+        }
+        do {
+            let urls = try incomingTransferURLs(id: id)
+            let name = URL(fileURLWithPath: event.title ?? "PhoneBridge-file").lastPathComponent
+            let contentType = event.source ?? "application/octet-stream"
+            var transfer: ResumableIncomingTransfer
+            if let stored = try? JSONDecoder().decode(ResumableIncomingTransfer.self, from: Data(contentsOf: urls.manifest)),
+               stored.id == id, stored.name == name, stored.contentType == contentType,
+               stored.size == size, stored.count == count, FileManager.default.fileExists(atPath: urls.part.path) {
+                transfer = stored
+                transfer.partPath = urls.part.path
+            } else {
+                try? FileManager.default.removeItem(at: urls.part)
+                try? FileManager.default.removeItem(at: urls.manifest)
+                FileManager.default.createFile(atPath: urls.part.path, contents: nil)
+                let file = try FileHandle(forWritingTo: urls.part)
+                try file.truncate(atOffset: UInt64(size))
+                try file.close()
+                transfer = ResumableIncomingTransfer(id: id, name: name, contentType: contentType, size: size,
+                                                     count: count, nextIndex: 0, partPath: urls.part.path)
+                try saveIncomingTransferManifest(transfer, to: urls.manifest)
+            }
+            if transfer.completed != true && transfer.nextIndex >= transfer.count {
+                transfer.nextIndex = max(0, transfer.count - 1)
+                try saveIncomingTransferManifest(transfer, to: urls.manifest)
+            }
+            resumableIncomingTransfers[id] = transfer
+            if transfer.completed == true {
+                updateIncomingTransferProgress(transfer, bytes: transfer.size, status: "완료", detail: "Mac에 안전하게 저장했습니다.")
+                server.sendSecure(["kind": "file_transfer_ready", "eventId": id, "success": true,
+                                   "nextIndex": transfer.count, "size": transfer.size])
+                server.sendSecure(["kind": "file_received", "eventId": id, "title": transfer.name,
+                                   "success": true, "size": transfer.size])
+                return
+            }
+            let receivedBytes = min(size, Int64(transfer.nextIndex * chunkSize))
+            updateIncomingTransferProgress(transfer, bytes: receivedBytes, status: "전송 중", detail: transfer.nextIndex > 0 ? "중단된 전송을 이어받습니다." : "휴대폰에서 받는 중입니다.")
+            recordDiagnostic("전송", transfer.nextIndex > 0 ? "중단된 파일 전송을 이어받습니다." : "휴대폰에서 파일 받기를 시작했습니다.")
+            server.sendSecure(["kind": "file_transfer_ready", "eventId": id, "success": true,
+                               "nextIndex": transfer.nextIndex, "size": receivedBytes])
+        } catch {
+            server.sendSecure(["kind": "file_transfer_ready", "eventId": id, "success": false,
+                               "text": "Mac에 파일을 저장할 공간이 부족하거나 파일을 만들 수 없습니다."])
+            recordDiagnostic("전송", "받는 파일의 임시 저장 공간을 준비하지 못했습니다.")
+        }
+    }
+
+    private func updateIncomingTransferProgress(_ transfer: ResumableIncomingTransfer, bytes: Int64, status: String, detail: String) {
+        incomingTransferProgress.removeAll { $0.id == transfer.id }
+        incomingTransferProgress.insert(PhoneBridgeTransferProgress(id: transfer.id, name: transfer.name,
+            direction: "휴대폰 → Mac", totalBytes: transfer.size, transferredBytes: bytes, status: status, detail: detail), at: 0)
+        incomingTransferProgress = Array(incomingTransferProgress.prefix(20))
+    }
+
+    private func receiveResumableFileChunk(_ event: PhoneEvent) {
+        guard let id = event.eventId, var transfer = resumableIncomingTransfers[id],
+              let index = event.transferIndex, event.transferCount == transfer.count,
+              let payload = event.payload,
+              let bytes = Data(base64Encoded: payload), bytes.count <= 24 * 1_024,
+              index >= 0, index < transfer.count else { return }
+        if transfer.completed == true {
+            server.sendSecure(["kind": "file_chunk_ack", "eventId": id, "transferIndex": index,
+                               "nextIndex": transfer.count, "size": transfer.size])
+            server.sendSecure(["kind": "file_received", "eventId": id, "title": transfer.name,
+                               "success": true, "size": transfer.size])
+            return
+        }
+        if index != transfer.nextIndex {
+            let receivedBytes = min(transfer.size, Int64(transfer.nextIndex * 24 * 1_024))
+            server.sendSecure(["kind": "file_chunk_ack", "eventId": id, "transferIndex": index,
+                               "nextIndex": transfer.nextIndex, "size": receivedBytes])
+            return
+        }
+        let expectedBytes = min(Int64(24 * 1_024), transfer.size - Int64(index * 24 * 1_024))
+        guard Int64(bytes.count) == expectedBytes else {
+            server.sendSecure(["kind": "file_chunk_ack", "eventId": id, "success": false,
+                               "text": "받은 파일 조각의 크기가 올바르지 않습니다."])
+            return
+        }
+        do {
+            let partURL = URL(fileURLWithPath: transfer.partPath)
+            let file = try FileHandle(forWritingTo: partURL)
+            try file.seek(toOffset: UInt64(index * 24 * 1_024))
+            try file.write(contentsOf: bytes)
+            try file.close()
+            transfer.nextIndex += 1
+            resumableIncomingTransfers[id] = transfer
+            let urls = try incomingTransferURLs(id: id)
+            try saveIncomingTransferManifest(transfer, to: urls.manifest)
+            let receivedBytes = min(transfer.size, Int64(transfer.nextIndex * 24 * 1_024))
+            updateIncomingTransferProgress(transfer, bytes: receivedBytes, status: "전송 중", detail: "파일을 안전하게 저장하고 있습니다.")
+            server.sendSecure(["kind": "file_chunk_ack", "eventId": id, "transferIndex": index,
+                               "nextIndex": transfer.nextIndex, "size": receivedBytes])
+            guard transfer.nextIndex == transfer.count else { return }
+            let data = try Data(contentsOf: partURL, options: .mappedIfSafe)
+            receivedFiles.insert(ReceivedFile(id: id, name: transfer.name, contentType: transfer.contentType,
+                                              data: data, receivedAt: Date()), at: 0)
+            var retainedBytes = 0
+            receivedFiles = receivedFiles.filter { file in
+                guard retainedBytes + file.data.count <= 128 * 1_024 * 1_024 else { return false }
+                retainedBytes += file.data.count
+                return true
+            }
+            transfer.completed = true
+            try saveIncomingTransferManifest(transfer, to: urls.manifest)
+            resumableIncomingTransfers[id] = transfer
+            updateIncomingTransferProgress(transfer, bytes: transfer.size, status: "완료", detail: "Mac에 안전하게 저장했습니다.")
+            actionMessage = "휴대폰에서 \(transfer.name)을(를) 받았습니다."
+            cleanTransferStorage()
+            server.sendSecure(["kind": "file_received", "eventId": id, "title": transfer.name,
+                               "success": true, "size": transfer.size])
+            recordDiagnostic("전송", "휴대폰에서 받은 파일을 저장했습니다.")
+        } catch {
+            server.sendSecure(["kind": "file_chunk_ack", "eventId": id, "success": false,
+                               "text": "Mac에 파일을 저장하지 못했습니다. 저장 공간을 확인하세요."])
+            updateIncomingTransferProgress(transfer, bytes: Int64(transfer.nextIndex * 24 * 1_024), status: "실패", detail: "Mac에 파일을 저장하지 못했습니다.")
+            recordDiagnostic("전송", "받는 파일을 저장하지 못했습니다.")
+        }
+    }
+
+    private func cancelResumableIncomingTransfer(_ id: String, notifyPeer: Bool) {
+        guard !id.isEmpty else { return }
+        if let completed = resumableIncomingTransfers[id], completed.completed == true {
+            if notifyPeer {
+                server.sendSecure(["kind": "file_received", "eventId": id, "title": completed.name,
+                                   "success": true, "size": completed.size])
+            }
+            return
+        }
+        if let transfer = resumableIncomingTransfers.removeValue(forKey: id),
+           let urls = try? incomingTransferURLs(id: id) {
+            try? FileManager.default.removeItem(at: urls.part)
+            try? FileManager.default.removeItem(at: urls.manifest)
+            updateIncomingTransferProgress(transfer, bytes: Int64(transfer.nextIndex * 24 * 1_024), status: "취소됨", detail: "전송을 취소했습니다.")
+        }
+        if notifyPeer { server.sendSecure(["kind": "file_cancelled", "eventId": id, "success": true]) }
+        recordDiagnostic("전송", "받는 파일 전송을 취소했습니다.")
+    }
+
     private func receiveFileChunk(_ event: PhoneEvent) {
         guard let transferId = event.eventId, let index = event.transferIndex,
               let count = event.transferCount, let payload = event.payload,
@@ -692,6 +1158,13 @@ final class PhoneBridgeModel: ObservableObject {
             return
         }
         incomingTransfers[transferId] = transfer
+        incomingTransferProgress.removeAll { $0.id == transferId }
+        incomingTransferProgress.insert(PhoneBridgeTransferProgress(
+            id: transferId, name: transfer.name, direction: "휴대폰 → Mac", totalBytes: 0,
+            transferredBytes: Int64(transfer.receivedBytes), status: "전송 중",
+            detail: "파일 조각 \(transfer.chunks.count)/\(count)을 받았습니다."
+        ), at: 0)
+        incomingTransferProgress = Array(incomingTransferProgress.prefix(20))
         guard transfer.chunks.count == count else { return }
         let data = (0..<count).reduce(into: Data()) { result, part in
             if let bytes = transfer.chunks[part] { result.append(bytes) }
@@ -704,6 +1177,12 @@ final class PhoneBridgeModel: ObservableObject {
             return true
         }
         incomingTransfers.removeValue(forKey: transferId)
+        incomingTransferProgress.removeAll { $0.id == transferId }
+        incomingTransferProgress.insert(PhoneBridgeTransferProgress(
+            id: transferId, name: transfer.name, direction: "휴대폰 → Mac", totalBytes: Int64(data.count),
+            transferredBytes: Int64(data.count), status: "완료", detail: "Mac에 안전하게 저장했습니다."
+        ), at: 0)
+        incomingTransferProgress = Array(incomingTransferProgress.prefix(20))
         actionMessage = "휴대폰에서 \(transfer.name)을(를) 받았습니다."
         if let assetId = galleryTransferToAsset.removeValue(forKey: transferId) {
             galleryDownloadingAssetIDs.remove(assetId)
@@ -838,6 +1317,7 @@ private final class MacLinkServer: @unchecked Sendable {
     var onStatus: ((String, Bool) -> Void)?
     var onPaired: ((String) -> Void)?
     var onEvent: ((PhoneEvent) -> Void)?
+    var onCapabilities: ((Set<String>) -> Void)?
 
     func start() {
         queue.async { self.startListener() }
@@ -931,6 +1411,8 @@ private final class MacLinkServer: @unchecked Sendable {
                 connection.cancel()
                 return
             }
+            let capabilities = Set((object["capabilities"] as? [String]) ?? [])
+            self.onCapabilities?(capabilities)
             let unexpiredPending = self.pendingSecretExpiresAt.map { $0 > Date() } == true ? self.pendingSecret : nil
             let key = unexpiredPending ?? self.paired?.secret
             guard let key else { connection.cancel(); return }
@@ -951,7 +1433,7 @@ private final class MacLinkServer: @unchecked Sendable {
             self.send([
                 "type": "welcome",
                 "proof": responseProof.base64EncodedString(),
-                "capabilities": ["heartbeat-v1"]
+                "capabilities": ["heartbeat-v1", "transfer-control-v1"]
             ], over: connection)
             if let previous = self.activeConnection, previous !== connection {
                 previous.cancel()

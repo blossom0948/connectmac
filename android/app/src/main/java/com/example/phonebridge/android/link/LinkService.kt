@@ -43,6 +43,8 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import java.security.MessageDigest
+import java.io.RandomAccessFile
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import android.net.nsd.NsdManager
@@ -60,9 +62,29 @@ object ConnectionState {
     val status = MutableStateFlow("연결 안 됨")
     val receivedFiles = kotlinx.coroutines.flow.MutableStateFlow<List<ReceivedFileItem>>(emptyList())
     val screenShareStatus = MutableStateFlow("화면 공유 안 함")
+    val transfers = MutableStateFlow<List<TransferProgress>>(emptyList())
+    val diagnostics = MutableStateFlow<List<PhoneBridgeDiagnostic>>(emptyList())
+
+    fun updateTransfer(transfer: TransferProgress) {
+        val current = transfers.value.filterNot { it.id == transfer.id }
+        transfers.value = (listOf(transfer) + current).take(30)
+    }
+
+    fun removeTransfer(id: String) {
+        transfers.value = transfers.value.filterNot { it.id == id }
+    }
 }
 
 data class ReceivedFileItem(val name: String, val path: String, val contentType: String, val size: Long)
+data class TransferProgress(
+    val id: String,
+    val name: String,
+    val direction: String,
+    val totalBytes: Long,
+    val transferredBytes: Long,
+    val status: String,
+    val detail: String,
+)
 
 class LinkService : Service() {
     companion object {
@@ -82,6 +104,9 @@ class LinkService : Service() {
         private const val CONNECTION_PROBE_TIMEOUT_MS = 8_000L
         private val executor: ExecutorService = Executors.newCachedThreadPool()
         private val fileTransferLock = Any()
+        private val transferMonitor = Object()
+        private val outgoingFileTransfers = mutableMapOf<String, OutgoingFileTransfer>()
+        @Volatile private var currentService: LinkService? = null
         private val heartbeatScheduler = Executors.newSingleThreadScheduledExecutor()
         private val connectionLock = Any()
         private data class ActiveSession(
@@ -89,25 +114,41 @@ class LinkService : Service() {
             val writer: BufferedWriter,
             val key: ByteArray,
             val heartbeatSupported: Boolean,
+            val transferControlSupported: Boolean,
         )
+        private class OutgoingFileTransfer(
+            val id: String,
+            val name: String,
+            val contentType: String,
+            val bytes: ByteArray,
+            val count: Int,
+        ) {
+            var cancelled = false
+            var readyNextIndex: Int? = null
+            var acknowledgedNextIndex: Int? = null
+            var completed: Boolean? = null
+            var failure: String? = null
+        }
         @Volatile private var activeSession: ActiveSession? = null
         @Volatile private var connecting = false
         @Volatile private var lastServerActivityAt = 0L
         @Volatile private var serverMessageSequence = 0L
 
-        fun sendEvent(context: Context, event: JSONObject) {
-            val session = activeSession ?: return
+        fun sendEvent(context: Context, event: JSONObject): Boolean {
+            val session = activeSession ?: return false
             try {
                 val line = LinkCrypto.seal(session.key, event).toString()
-                synchronized(session.writer) {
-                    if (activeSession !== session || session.socket.isClosed) return
+                return synchronized(session.writer) {
+                    if (activeSession !== session || session.socket.isClosed) return@synchronized false
                     session.writer.write(line)
                     session.writer.newLine()
                     session.writer.flush()
+                    true
                 }
             } catch (_: Exception) {
                 // Closing the socket wakes the reader, which clears this session and starts discovery again.
                 if (activeSession === session) runCatching { session.socket.close() }
+                return false
             }
         }
 
@@ -124,25 +165,194 @@ class LinkService : Service() {
         fun sendFile(context: Context, name: String, contentType: String, bytes: ByteArray, transferId: String? = null): Boolean {
             if (bytes.size > 100 * 1024 * 1024 || !isConnected()) return false
             return synchronized(fileTransferLock) {
-                if (!isConnected()) return@synchronized false
                 val currentTransferId = transferId ?: java.util.UUID.randomUUID().toString()
                 val chunkSize = 24 * 1024
                 val count = maxOf(1, (bytes.size + chunkSize - 1) / chunkSize)
-                for (index in 0 until count) {
-                    if (!isConnected()) return@synchronized false
-                    val start = index * chunkSize
-                    val end = minOf(start + chunkSize, bytes.size)
-                    sendEvent(context, JSONObject()
-                        .put("kind", "file_chunk")
-                        .put("eventId", currentTransferId)
-                        .put("title", name)
-                        .put("source", contentType)
-                        .put("transferIndex", index)
-                        .put("transferCount", count)
-                        .put("payload", Base64.encodeToString(bytes.copyOfRange(start, end), Base64.NO_WRAP)))
+                val transfer = OutgoingFileTransfer(currentTransferId, name, contentType, bytes, count)
+                if (activeSession?.transferControlSupported != true) {
+                    synchronized(transferMonitor) { outgoingFileTransfers[currentTransferId] = transfer }
+                    return@synchronized try {
+                        val sent = sendLegacyFile(context, transfer)
+                        if (!sent && isCancelled(transfer)) {
+                            ConnectionState.updateTransfer(TransferProgress(currentTransferId, name, "휴대폰 → Mac", bytes.size.toLong(), 0, "취소됨", "전송을 취소했습니다."))
+                            PhoneBridgeDiagnostics.record("전송", "파일 전송을 취소했습니다.")
+                        } else if (!sent) {
+                            ConnectionState.updateTransfer(TransferProgress(currentTransferId, name, "휴대폰 → Mac", bytes.size.toLong(), 0, "실패", "구버전 Mac 연결이 끊겨 전송을 마치지 못했습니다."))
+                            PhoneBridgeDiagnostics.record("전송", "구버전 Mac으로 파일 전송이 실패했습니다.")
+                        } else PhoneBridgeDiagnostics.record("전송", "휴대폰에서 Mac으로 파일을 보냈습니다.")
+                        sent
+                    } finally {
+                        synchronized(transferMonitor) { outgoingFileTransfers.remove(currentTransferId) }
+                    }
                 }
-                true
+                synchronized(transferMonitor) { outgoingFileTransfers[currentTransferId] = transfer }
+                PhoneBridgeDiagnostics.record("전송", "휴대폰에서 Mac으로 파일 전송을 시작했습니다.")
+                try {
+                    sendResumableFile(context, transfer)
+                } finally {
+                    synchronized(transferMonitor) { outgoingFileTransfers.remove(currentTransferId) }
+                }
             }
+        }
+
+        private fun sendLegacyFile(context: Context, transfer: OutgoingFileTransfer): Boolean {
+            ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), 0, "전송 중", "구버전 Mac에 전송 중입니다."))
+            val chunkSize = 24 * 1024
+            for (index in 0 until transfer.count) {
+                if (isCancelled(transfer)) return false
+                if (!isConnected()) return false
+                val start = index * chunkSize
+                val end = minOf(start + chunkSize, transfer.bytes.size)
+                if (!sendEvent(context, JSONObject()
+                        .put("kind", "file_chunk")
+                        .put("eventId", transfer.id)
+                        .put("title", transfer.name)
+                        .put("source", transfer.contentType)
+                        .put("transferIndex", index)
+                        .put("transferCount", transfer.count)
+                        .put("payload", Base64.encodeToString(transfer.bytes.copyOfRange(start, end), Base64.NO_WRAP)))
+                ) return false
+                ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), end.toLong(), "전송 중", "구버전 Mac에 전송 중입니다."))
+            }
+            ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), transfer.bytes.size.toLong(), "완료", "파일을 전송했습니다."))
+            return true
+        }
+
+        private fun sendResumableFile(context: Context, transfer: OutgoingFileTransfer): Boolean {
+            val chunkSize = 24 * 1024
+            var nextIndex = 0
+            while (true) {
+                if (isCancelled(transfer)) {
+                    sendEvent(context, JSONObject().put("kind", "file_cancel").put("eventId", transfer.id))
+                    ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), minOf(transfer.bytes.size.toLong(), nextIndex.toLong() * chunkSize), "취소됨", "전송을 취소했습니다."))
+                    return false
+                }
+                val session = activeSession?.takeIf { it.transferControlSupported }
+                if (session == null) {
+                    updateOutgoingTransfer(transfer, nextIndex, "이어받기 대기", "연결을 기다리는 중입니다.")
+                    synchronized(transferMonitor) {
+                        if (!transfer.cancelled) transferMonitor.wait(750)
+                    }
+                    continue
+                }
+                synchronized(transferMonitor) {
+                    transfer.readyNextIndex = null
+                    transfer.acknowledgedNextIndex = null
+                    transfer.completed = null
+                    transfer.failure = null
+                }
+                if (!sendEvent(context, JSONObject()
+                        .put("kind", "file_start")
+                        .put("eventId", transfer.id)
+                        .put("title", transfer.name)
+                        .put("source", transfer.contentType)
+                        .put("size", transfer.bytes.size)
+                        .put("transferCount", transfer.count)
+                        .put("chunkSize", chunkSize))) continue
+                if (!awaitTransferSignal(transfer, session, "ready")) {
+                    if (isCancelled(transfer) || activeSession !== session) continue
+                    ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), 0, "실패", "Mac이 전송 준비에 응답하지 않았습니다."))
+                    PhoneBridgeDiagnostics.record("전송", "Mac이 파일 전송 준비에 응답하지 않았습니다.")
+                    return false
+                }
+                synchronized(transferMonitor) {
+                    transfer.failure?.let { failure ->
+                        ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), 0, "실패", failure))
+                        return false
+                    }
+                    nextIndex = transfer.readyNextIndex ?: 0
+                }
+                updateOutgoingTransfer(transfer, nextIndex, "전송 중", "이어받기를 시작했습니다.")
+                var disconnected = false
+                while (nextIndex < transfer.count) {
+                    if (isCancelled(transfer)) break
+                    val start = nextIndex * chunkSize
+                    val end = minOf(start + chunkSize, transfer.bytes.size)
+                    synchronized(transferMonitor) { transfer.acknowledgedNextIndex = null }
+                    if (!sendEvent(context, JSONObject()
+                            .put("kind", "file_chunk")
+                            .put("eventId", transfer.id)
+                            .put("title", transfer.name)
+                            .put("source", transfer.contentType)
+                            .put("transferIndex", nextIndex)
+                            .put("transferCount", transfer.count)
+                            .put("payload", Base64.encodeToString(transfer.bytes.copyOfRange(start, end), Base64.NO_WRAP)))) {
+                        disconnected = true
+                        break
+                    }
+                    if (!awaitTransferSignal(transfer, session, "ack")) {
+                        if (isCancelled(transfer)) break
+                        if (activeSession !== session) { disconnected = true; break }
+                        ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), nextIndex.toLong() * chunkSize, "실패", "Mac의 전송 확인이 시간 초과되었습니다."))
+                        PhoneBridgeDiagnostics.record("전송", "Mac의 파일 조각 저장 확인이 시간 초과되었습니다.")
+                        return false
+                    }
+                    synchronized(transferMonitor) {
+                        transfer.failure?.let { failure ->
+                            ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), nextIndex.toLong() * chunkSize, "실패", failure))
+                            return false
+                        }
+                        val acknowledged = transfer.acknowledgedNextIndex ?: nextIndex
+                        if (acknowledged <= nextIndex || acknowledged > transfer.count) {
+                            ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), nextIndex.toLong() * chunkSize, "실패", "잘못된 전송 확인을 받았습니다."))
+                            return false
+                        }
+                        nextIndex = acknowledged
+                    }
+                    updateOutgoingTransfer(transfer, nextIndex, "전송 중", "Mac에 저장 중입니다.")
+                }
+                if (isCancelled(transfer)) continue
+                if (disconnected || activeSession !== session) continue
+                if (!awaitTransferSignal(transfer, session, "complete")) {
+                    if (activeSession !== session || isCancelled(transfer)) continue
+                    ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), transfer.bytes.size.toLong(), "실패", "Mac의 저장 확인이 시간 초과되었습니다."))
+                    return false
+                }
+                synchronized(transferMonitor) {
+                    val success = transfer.completed == true
+                    val detail = transfer.failure ?: if (success) "Mac에 안전하게 저장했습니다." else "Mac에 파일을 저장하지 못했습니다."
+                    ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), if (success) transfer.bytes.size.toLong() else nextIndex.toLong() * chunkSize, if (success) "완료" else "실패", detail))
+                    PhoneBridgeDiagnostics.record("전송", if (success) "휴대폰에서 Mac으로 파일 전송이 완료되었습니다." else "휴대폰에서 Mac으로 파일 전송이 실패했습니다.")
+                    return success
+                }
+            }
+        }
+
+        private fun updateOutgoingTransfer(transfer: OutgoingFileTransfer, nextIndex: Int, status: String, detail: String) {
+            val bytesSent = minOf(transfer.bytes.size.toLong(), nextIndex.toLong() * 24 * 1024)
+            ConnectionState.updateTransfer(TransferProgress(transfer.id, transfer.name, "휴대폰 → Mac", transfer.bytes.size.toLong(), bytesSent, status, detail))
+        }
+
+        private fun isCancelled(transfer: OutgoingFileTransfer): Boolean = synchronized(transferMonitor) { transfer.cancelled }
+
+        private fun awaitTransferSignal(transfer: OutgoingFileTransfer, session: ActiveSession, signal: String): Boolean {
+            val deadline = SystemClock.elapsedRealtime() + TimeUnit.SECONDS.toMillis(60)
+            synchronized(transferMonitor) {
+                while (!transfer.cancelled && activeSession === session && SystemClock.elapsedRealtime() < deadline) {
+                    val ready = when (signal) {
+                        "ready" -> transfer.readyNextIndex != null || transfer.failure != null
+                        "ack" -> transfer.acknowledgedNextIndex != null || transfer.failure != null
+                        else -> transfer.completed != null || transfer.failure != null
+                    }
+                    if (ready) return true
+                    transferMonitor.wait(500)
+                }
+                return false
+            }
+        }
+
+        fun cancelFileTransfer(id: String) {
+            val service = currentService
+            synchronized(transferMonitor) {
+                outgoingFileTransfers[id]?.cancelled = true
+                transferMonitor.notifyAll()
+            }
+            if (service != null) sendEvent(service, JSONObject().put("kind", "file_cancel").put("eventId", id))
+            service?.cancelIncomingFileTransfer(id, notifyPeer = false)
+            ConnectionState.transfers.value.firstOrNull { it.id == id }?.let { current ->
+                ConnectionState.updateTransfer(current.copy(status = "취소됨", detail = "전송을 취소했습니다."))
+            }
+            PhoneBridgeDiagnostics.record("전송", "파일 전송을 사용자가 취소했습니다.")
         }
 
         fun sendClipboardText(context: Context, text: String): Boolean {
@@ -181,11 +391,26 @@ class LinkService : Service() {
         var receivedBytes: Int = 0,
     )
     private val incomingTransfers = mutableMapOf<String, IncomingTransfer>()
+    private data class ResumableIncomingTransfer(
+        val id: String,
+        val name: String,
+        val contentType: String,
+        val size: Long,
+        val count: Int,
+        val partFile: File,
+        val manifestFile: File,
+        var nextIndex: Int,
+        var lastActivityAt: Long = SystemClock.elapsedRealtime(),
+        var completedFileName: String? = null,
+    )
+    private val resumableIncomingTransfers = mutableMapOf<String, ResumableIncomingTransfer>()
 
     override fun onCreate() {
         super.onCreate()
+        currentService = this
         createNotificationChannel()
         registerBatteryUpdates()
+        cleanStaleIncomingTransfers()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -232,6 +457,7 @@ class LinkService : Service() {
 
     override fun onDestroy() {
         stopLink()
+        if (currentService === this) currentService = null
         stopScreenMirror(notifyMac = false)
         findPhoneTone?.release()
         findPhoneTone = null
@@ -376,7 +602,7 @@ class LinkService : Service() {
             val proof = LinkCrypto.hmac(secret, "auth|${LinkCrypto.b64(nonce)}|$deviceName")
             synchronized(writer) {
                 writer.write(JSONObject().put("type", "auth").put("name", deviceName).put("proof", LinkCrypto.b64(proof))
-                    .put("capabilities", org.json.JSONArray().put("peer-probe-v1")).toString())
+                    .put("capabilities", org.json.JSONArray().put("peer-probe-v1").put("transfer-control-v1")).toString())
                 writer.newLine()
                 writer.flush()
             }
@@ -388,11 +614,14 @@ class LinkService : Service() {
             val heartbeatSupported = capabilities != null && (0 until capabilities.length()).any {
                 capabilities.optString(it) == "heartbeat-v1"
             }
+            val transferControlSupported = capabilities != null && (0 until capabilities.length()).any {
+                capabilities.optString(it) == "transfer-control-v1"
+            }
             socket.soTimeout = if (heartbeatSupported) (HEARTBEAT_TIMEOUT_MS + 5_000L).toInt() else 0
             val sessionKey = LinkCrypto.deriveSessionKey(secret, nonce)
             synchronized(connectionLock) {
                 activeSession?.takeIf { it.socket !== socket }?.let { runCatching { it.socket.close() } }
-                activeSession = ActiveSession(socket, writer, sessionKey, heartbeatSupported)
+                activeSession = ActiveSession(socket, writer, sessionKey, heartbeatSupported, transferControlSupported)
                 lastServerActivityAt = SystemClock.elapsedRealtime()
                 connecting = false
             }
@@ -414,6 +643,8 @@ class LinkService : Service() {
             }
             stopDiscovery()
             ConnectionState.status.value = "Mac에 연결됨"
+            PhoneBridgeDiagnostics.record("연결", "Mac과 로컬 Wi‑Fi 연결이 수립되었습니다.")
+            synchronized(transferMonitor) { transferMonitor.notifyAll() }
             sendBatterySnapshot()
             sendRemoteControlStatus(this)
             executor.execute { readServer(socket, reader, sessionKey) }
@@ -459,12 +690,18 @@ class LinkService : Service() {
         stopDiscovery()
         stopScreenMirror(notifyMac = false)
         ConnectionState.status.value = status
+        PhoneBridgeDiagnostics.record("연결", "연결이 끊겨 자동 재연결을 시작했습니다.")
+        synchronized(transferMonitor) { transferMonitor.notifyAll() }
         scheduleDiscovery()
     }
 
     private fun handleCommand(command: JSONObject) {
         when (command.optString("kind")) {
             "heartbeat_ping" -> sendEvent(this, JSONObject().put("kind", "heartbeat_pong").put("timestamp", System.currentTimeMillis() / 1000.0))
+            "file_transfer_ready" -> updateOutgoingTransferResponse(command, "ready")
+            "file_chunk_ack" -> updateOutgoingTransferResponse(command, "ack")
+            "file_received" -> updateOutgoingTransferResponse(command, "complete")
+            "file_cancelled" -> updateOutgoingTransferResponse(command, "cancelled")
             "notification_reply" -> {
                 val eventId = command.optString("eventId")
                 val success = PhoneNotificationListener.sendReply(eventId, command.optString("text"))
@@ -554,7 +791,36 @@ class LinkService : Service() {
                     }
                 }
             }
-            "file_chunk" -> receiveFileChunk(command)
+            "file_start" -> beginIncomingFileTransfer(command)
+            "file_cancel" -> cancelIncomingFileTransfer(command.optString("eventId"))
+            "file_chunk" -> {
+                if (command.optString("eventId") in resumableIncomingTransfers || hasIncomingTransferManifest(command.optString("eventId"))) {
+                    receiveResumableFileChunk(command)
+                } else receiveFileChunk(command)
+            }
+        }
+    }
+
+    private fun updateOutgoingTransferResponse(command: JSONObject, kind: String) {
+        val id = command.optString("eventId")
+        synchronized(transferMonitor) {
+            val transfer = outgoingFileTransfers[id] ?: return
+            when (kind) {
+                "ready" -> {
+                    if (command.optBoolean("success", true)) transfer.readyNextIndex = command.optInt("nextIndex", 0)
+                    else transfer.failure = command.optString("text", "Mac이 전송 준비를 거부했습니다.")
+                }
+                "ack" -> {
+                    if (command.optBoolean("success", true)) transfer.acknowledgedNextIndex = command.optInt("nextIndex", -1)
+                    else transfer.failure = command.optString("text", "Mac이 파일 조각을 저장하지 못했습니다.")
+                }
+                "complete" -> {
+                    transfer.completed = command.optBoolean("success", true)
+                    if (!command.optBoolean("success", true)) transfer.failure = command.optString("text", "Mac에 파일을 저장하지 못했습니다.")
+                }
+                "cancelled" -> transfer.cancelled = true
+            }
+            transferMonitor.notifyAll()
         }
     }
 
@@ -640,6 +906,211 @@ class LinkService : Service() {
         val digits = value.count(Char::isDigit)
         if (digits !in 3..20 || value.any { !it.isDigit() && it !in "+ ()-" }) return null
         return value.filter { it.isDigit() || it == '+' }
+    }
+
+    private fun transferStorageDirectory(): File = File(filesDir, "phonebridge-transfer-parts").apply { mkdirs() }
+
+    private fun transferStorageFiles(id: String): Pair<File, File> {
+        val safeKey = MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+        val directory = transferStorageDirectory()
+        return File(directory, "$safeKey.part") to File(directory, "$safeKey.json")
+    }
+
+    private fun hasIncomingTransferManifest(id: String): Boolean = id.isNotBlank() && transferStorageFiles(id).second.isFile
+
+    private fun readIncomingTransferManifest(id: String): ResumableIncomingTransfer? = runCatching {
+        val (partFile, manifestFile) = transferStorageFiles(id)
+        val metadata = JSONObject(manifestFile.readText())
+        require(metadata.optString("id") == id)
+        ResumableIncomingTransfer(
+            id = id,
+            name = metadata.optString("name"),
+            contentType = metadata.optString("contentType", "application/octet-stream"),
+            size = metadata.optLong("size", -1),
+            count = metadata.optInt("count", -1),
+            partFile = partFile,
+            manifestFile = manifestFile,
+            nextIndex = metadata.optInt("nextIndex", 0),
+            completedFileName = metadata.optString("completedFileName").takeIf { it.isNotBlank() },
+        ).also { transfer ->
+            require(transfer.size in 0..(100L * 1024 * 1024) && transfer.count in 1..5000)
+            if (transfer.completedFileName == null) require(partFile.isFile)
+        }
+    }.getOrNull()
+
+    private fun saveIncomingTransferManifest(transfer: ResumableIncomingTransfer) {
+        val temporary = File(transfer.manifestFile.parentFile, "${transfer.manifestFile.name}.tmp")
+        val value = JSONObject()
+            .put("id", transfer.id)
+            .put("name", transfer.name)
+            .put("contentType", transfer.contentType)
+            .put("size", transfer.size)
+            .put("count", transfer.count)
+            .put("nextIndex", transfer.nextIndex)
+            .put("completedFileName", transfer.completedFileName ?: "")
+        temporary.writeText(value.toString())
+        if (!temporary.renameTo(transfer.manifestFile)) {
+            transfer.manifestFile.writeText(value.toString())
+            temporary.delete()
+        }
+    }
+
+    private fun beginIncomingFileTransfer(command: JSONObject) {
+        val id = command.optString("eventId")
+        val name = File(command.optString("title", "PhoneBridge-file")).name.ifBlank { "PhoneBridge-file" }
+        val contentType = command.optString("source", "application/octet-stream")
+        val size = command.optLong("size", -1)
+        val count = command.optInt("transferCount", -1)
+        val chunkSize = command.optInt("chunkSize", 24 * 1024)
+        val expectedCount = maxOf(1, ((size.coerceAtLeast(0) + chunkSize - 1) / chunkSize).toInt())
+        if (id.isBlank() || size !in 0..(100L * 1024 * 1024) || chunkSize != 24 * 1024 || count != expectedCount || count !in 1..5000) {
+            sendEvent(this, JSONObject().put("kind", "file_transfer_ready").put("eventId", id).put("success", false).put("text", "파일 정보가 올바르지 않습니다."))
+            return
+        }
+        val (partFile, manifestFile) = transferStorageFiles(id)
+        val old = readIncomingTransferManifest(id)
+        val transfer = if (old != null && old.name == name && old.contentType == contentType && old.size == size && old.count == count) {
+            old
+        } else {
+            old?.partFile?.delete()
+            old?.manifestFile?.delete()
+            runCatching {
+                RandomAccessFile(partFile, "rw").use { it.setLength(size) }
+                ResumableIncomingTransfer(id, name, contentType, size, count, partFile, manifestFile, 0).also(::saveIncomingTransferManifest)
+            }.getOrElse {
+                sendEvent(this, JSONObject().put("kind", "file_transfer_ready").put("eventId", id).put("success", false).put("text", "전송 공간을 준비하지 못했습니다. 저장 공간을 확인하세요."))
+                PhoneBridgeDiagnostics.record("전송", "받는 파일의 임시 저장 공간을 준비하지 못했습니다.")
+                return
+            }
+        }
+        synchronized(resumableIncomingTransfers) { resumableIncomingTransfers[id] = transfer }
+        if (transfer.completedFileName == null && transfer.nextIndex >= transfer.count) {
+            transfer.nextIndex = maxOf(0, transfer.count - 1)
+            saveIncomingTransferManifest(transfer)
+        }
+        if (transfer.completedFileName != null) {
+            val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            val completed = File(directory, transfer.completedFileName!!)
+            if (completed.isFile) {
+                sendEvent(this, JSONObject().put("kind", "file_transfer_ready").put("eventId", id).put("success", true).put("nextIndex", count).put("size", size))
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", id).put("title", completed.name).put("success", true).put("size", completed.length()))
+                return
+            }
+            transfer.completedFileName = null
+            transfer.nextIndex = 0
+            RandomAccessFile(partFile, "rw").use { it.setLength(size) }
+            saveIncomingTransferManifest(transfer)
+        }
+        val receivedBytes = minOf(size, transfer.nextIndex.toLong() * chunkSize)
+        ConnectionState.updateTransfer(TransferProgress(id, name, "Mac → 휴대폰", size, receivedBytes, "전송 중", "이어받기 준비 완료"))
+        PhoneBridgeDiagnostics.record("전송", if (transfer.nextIndex > 0) "중단된 파일 전송을 이어받을 준비가 되었습니다." else "Mac에서 파일 받기를 시작했습니다.")
+        sendEvent(this, JSONObject().put("kind", "file_transfer_ready").put("eventId", id).put("success", true).put("nextIndex", transfer.nextIndex).put("size", receivedBytes))
+    }
+
+    private fun receiveResumableFileChunk(chunk: JSONObject) {
+        val id = chunk.optString("eventId")
+        val transfer = synchronized(resumableIncomingTransfers) { resumableIncomingTransfers[id] }
+            ?: readIncomingTransferManifest(id)?.also { synchronized(resumableIncomingTransfers) { resumableIncomingTransfers[id] = it } }
+            ?: return
+        val index = chunk.optInt("transferIndex", -1)
+        val count = chunk.optInt("transferCount", -1)
+        val bytes = runCatching { Base64.decode(chunk.getString("payload"), Base64.DEFAULT) }.getOrNull() ?: return
+        if (count != transfer.count || index !in 0 until transfer.count || bytes.size > 24 * 1024) return
+        synchronized(resumableIncomingTransfers) {
+            if (transfer.completedFileName != null) {
+                sendEvent(this, JSONObject().put("kind", "file_chunk_ack").put("eventId", id).put("transferIndex", index).put("nextIndex", transfer.count).put("size", transfer.size))
+                return
+            }
+            if (index != transfer.nextIndex) {
+                val currentBytes = minOf(transfer.size, transfer.nextIndex.toLong() * 24 * 1024)
+                sendEvent(this, JSONObject().put("kind", "file_chunk_ack").put("eventId", id).put("transferIndex", index).put("nextIndex", transfer.nextIndex).put("size", currentBytes))
+                return
+            }
+            val expectedBytes = minOf(24L * 1024, transfer.size - index.toLong() * 24 * 1024).toInt()
+            if (bytes.size != expectedBytes) {
+                sendEvent(this, JSONObject().put("kind", "file_chunk_ack").put("eventId", id).put("success", false).put("text", "파일 조각의 크기가 올바르지 않습니다."))
+                return
+            }
+            runCatching {
+                RandomAccessFile(transfer.partFile, "rw").use { file ->
+                    file.seek(index.toLong() * 24 * 1024)
+                    file.write(bytes)
+                }
+                transfer.nextIndex += 1
+                transfer.lastActivityAt = SystemClock.elapsedRealtime()
+                saveIncomingTransferManifest(transfer)
+            }.onFailure {
+                sendEvent(this, JSONObject().put("kind", "file_chunk_ack").put("eventId", id).put("success", false).put("text", "파일을 저장할 수 없습니다. 저장 공간을 확인하세요."))
+                PhoneBridgeDiagnostics.record("전송", "받는 파일을 저장하지 못했습니다.")
+                return
+            }
+            val receivedBytes = minOf(transfer.size, transfer.nextIndex.toLong() * 24 * 1024)
+            ConnectionState.updateTransfer(TransferProgress(id, transfer.name, "Mac → 휴대폰", transfer.size, receivedBytes, "전송 중", "파일 조각을 저장했습니다."))
+            sendEvent(this, JSONObject().put("kind", "file_chunk_ack").put("eventId", id).put("transferIndex", index).put("nextIndex", transfer.nextIndex).put("size", receivedBytes))
+            if (transfer.nextIndex < transfer.count) return
+            val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            directory.mkdirs()
+            val safeName = File(transfer.name).name.ifBlank { "PhoneBridge-file" }
+            val transferKey = transferStorageFiles(id).first.name.removeSuffix(".part")
+            val finalFile = File(directory, "PhoneBridge-$transferKey-$safeName")
+            val staging = File(directory, "phonebridge-${java.util.UUID.randomUUID()}.part")
+            runCatching {
+                transfer.partFile.copyTo(staging, overwrite = true)
+                finalFile.delete()
+                check(staging.renameTo(finalFile)) { "파일을 저장 위치로 옮기지 못했습니다." }
+                transfer.completedFileName = finalFile.name
+                saveIncomingTransferManifest(transfer)
+                transfer.partFile.delete()
+                val received = ReceivedFileItem(finalFile.name, finalFile.absolutePath, transfer.contentType, finalFile.length())
+                ConnectionState.receivedFiles.value = listOf(received) + ConnectionState.receivedFiles.value.filterNot { it.path == received.path }
+                ConnectionState.updateTransfer(TransferProgress(id, transfer.name, "Mac → 휴대폰", transfer.size, transfer.size, "완료", "휴대폰에 안전하게 저장했습니다."))
+                PhoneBridgeDiagnostics.record("전송", "Mac에서 받은 파일을 저장했습니다.")
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", id).put("title", finalFile.name).put("success", true).put("size", finalFile.length()))
+            }.onFailure {
+                staging.delete()
+                finalFile.delete()
+                transfer.nextIndex = maxOf(0, transfer.count - 1)
+                saveIncomingTransferManifest(transfer)
+                sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", id).put("success", false).put("text", "파일을 저장하지 못했습니다. 저장 공간을 확인하세요."))
+                PhoneBridgeDiagnostics.record("전송", "받는 파일을 저장하지 못했습니다.")
+            }
+        }
+    }
+
+    private fun cancelIncomingFileTransfer(id: String, notifyPeer: Boolean = true) {
+        if (id.isBlank()) return
+        val existing = synchronized(resumableIncomingTransfers) { resumableIncomingTransfers[id] }
+            ?: readIncomingTransferManifest(id)
+        if (existing?.completedFileName != null) {
+            val directory = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+            val completed = File(directory, existing.completedFileName!!)
+            if (completed.isFile) {
+                if (notifyPeer) sendEvent(this, JSONObject().put("kind", "file_received").put("eventId", id)
+                    .put("title", completed.name).put("success", true).put("size", completed.length()))
+                return
+            }
+        }
+        synchronized(resumableIncomingTransfers) {
+            val transfer = resumableIncomingTransfers.remove(id) ?: existing
+            if (transfer != null && transfer.completedFileName == null) {
+                transfer.partFile.delete()
+                transfer.manifestFile.delete()
+            }
+        }
+        ConnectionState.removeTransfer(id)
+        if (notifyPeer) sendEvent(this, JSONObject().put("kind", "file_cancelled").put("eventId", id).put("success", true))
+        PhoneBridgeDiagnostics.record("전송", "받는 파일 전송이 취소되었습니다.")
+    }
+
+    private fun cleanStaleIncomingTransfers() {
+        val directory = transferStorageDirectory()
+        val cutoff = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(7)
+        directory.listFiles()?.filter { it.lastModified() < cutoff }?.forEach { file ->
+            val id = runCatching { JSONObject(file.readText()).optString("id") }.getOrNull()
+            if (file.extension == "json" && !id.isNullOrBlank()) transferStorageFiles(id).first.delete()
+            file.delete()
+        }
     }
 
     private fun receiveFileChunk(chunk: JSONObject) {

@@ -3,8 +3,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-}"
+DEVELOPER_ID="${PHONEBRIDGE_DEVELOPER_ID:-}"
+NOTARY_PROFILE="${PHONEBRIDGE_NOTARY_PROFILE:-}"
+if [[ -z "$DEVELOPER_ID" || -z "$NOTARY_PROFILE" ]]; then
+  if [[ "${PHONEBRIDGE_ALLOW_UNNOTARIZED:-0}" != "1" ]]; then
+    echo "A Developer ID Application identity and notarytool keychain profile are required for a distributable Mac DMG." >&2
+    echo "Set PHONEBRIDGE_DEVELOPER_ID and PHONEBRIDGE_NOTARY_PROFILE. For a local-only build, explicitly set PHONEBRIDGE_ALLOW_UNNOTARIZED=1." >&2
+    exit 1
+  fi
+  if [[ -n "$DEVELOPER_ID" || -n "$NOTARY_PROFILE" ]]; then
+    echo "Set both signing and notarization values, or unset both for the explicit unnotarized local build." >&2
+    exit 1
+  fi
+fi
 if [[ -z "$VERSION" ]]; then
-  echo "Usage: scripts/package-release.sh <version> (for example 0.3.5)" >&2
+  echo "Usage: scripts/package-release.sh <version> (for example 0.3.6)" >&2
   exit 2
 fi
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -79,16 +92,37 @@ cat > "$RELEASE_DIR/phonebridge-update.json" <<EOF
   "versionCode": $VERSION_CODE,
   "apkUrl": "${DOWNLOAD_PREFIX}PhoneBridge-android.apk",
   "sha256": "$APK_SHA256",
-  "notes": "사진 여러 장을 차례로 안전하게 받고, Mac에서 Android로 보내는 파일은 저장 확인과 재시도 상태를 표시합니다. Android에서 받은 파일을 다른 앱으로 공유하거나 삭제할 수 있고, 중단된 파일 조각은 연결이 끊길 때 정리합니다."
+  "notes": "양방향 파일 전송 진행률과 취소를 제공하고 Wi-Fi가 다시 연결되면 중단한 위치부터 이어받습니다. 연결·전송 진단 기록은 개인정보를 제외하고 공유할 수 있습니다."
 }
 EOF
 
 echo "Building macOS app and DMG..."
 swift "$ROOT/macOS/scripts/generate-app-icon.swift"
 (cd "$ROOT/macOS" && swift build -c release && ./scripts/make-app.sh)
+APP="$ROOT/macOS/.build/PhoneBridge.app"
+if [[ -n "$DEVELOPER_ID" ]]; then
+  FRAMEWORKS="$APP/Contents/Frameworks"
+  while IFS= read -r -d '' CODE_FILE; do
+    /usr/bin/codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$CODE_FILE"
+  done < <(find "$FRAMEWORKS" -type f -perm -111 -print0)
+  while IFS= read -r -d '' CODE_BUNDLE; do
+    /usr/bin/codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$CODE_BUNDLE"
+  done < <(find "$FRAMEWORKS" -depth -type d \( -name '*.xpc' -o -name '*.app' -o -name '*.framework' \) -print0)
+  /usr/bin/codesign --force --options runtime --timestamp --sign "$DEVELOPER_ID" "$APP"
+  /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
+fi
 ditto "$ROOT/macOS/.build/PhoneBridge.app" "$DMG_STAGE/PhoneBridge.app"
 ln -s /Applications "$DMG_STAGE/Applications"
 hdiutil create -volname PhoneBridge -srcfolder "$DMG_STAGE" -format UDZO -ov "$RELEASE_DIR/PhoneBridge-macOS.dmg" >/dev/null
+
+if [[ -n "$DEVELOPER_ID" ]]; then
+  echo "Submitting Mac DMG for Apple notarization..."
+  xcrun notarytool submit "$RELEASE_DIR/PhoneBridge-macOS.dmg" --keychain-profile "$NOTARY_PROFILE" --wait
+  xcrun stapler staple "$RELEASE_DIR/PhoneBridge-macOS.dmg"
+  xcrun stapler validate "$RELEASE_DIR/PhoneBridge-macOS.dmg"
+else
+  echo "Building an explicitly unnotarized local-only DMG. Do not publish this file."
+fi
 
 if [[ ! -x "$SPARKLE_BIN/generate_appcast" ]]; then
   echo "Sparkle tools are missing. Run (cd macOS && swift package resolve)." >&2
@@ -105,7 +139,8 @@ cp "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$SPARKLE_STAGE/PhoneBridge-macOS.dmg"
 cat > "$SPARKLE_STAGE/PhoneBridge-macOS.md" <<EOF
 PhoneBridge $VERSION
 
-- Mac에서 Android로 보내는 파일을 한 개씩 처리하고 휴대폰 저장 완료를 확인합니다. 연결 오류나 저장 실패를 표시하고 재시도할 수 있습니다.
+- 양방향 파일 전송 진행률, 취소, Wi-Fi 재연결 후 이어받기와 진단 기록 내보내기를 추가했습니다.
+- Mac 배포 DMG는 Developer ID 서명과 Apple 공증 후 티켓을 첨부합니다.
 - 갤러리에서 여러 사진을 선택해 순서대로 받을 수 있으며, 이미 받는 중인 사진을 중복 요청하지 않습니다.
 - Android에서 받은 파일을 전체·사진·파일로 분류하고 열기, 다른 앱으로 공유, 확인 후 삭제할 수 있습니다.
 - 끊긴 연결의 불완전한 파일 조각을 정리하고, 큰 전송의 누적 용량 계산을 효율적으로 처리합니다.
@@ -113,9 +148,13 @@ PhoneBridge $VERSION
 EOF
 "$SPARKLE_BIN/generate_appcast" --download-url-prefix "$DOWNLOAD_PREFIX" --embed-release-notes "$SPARKLE_STAGE"
 cp "$SPARKLE_STAGE/appcast.xml" "$RELEASE_DIR/appcast.xml"
-mkdir -p "$ROOT/updates"
-cp "$SPARKLE_STAGE/appcast.xml" "$ROOT/updates/appcast.xml"
-cp "$RELEASE_DIR/phonebridge-update.json" "$ROOT/updates/phonebridge-update.json"
+if [[ -n "$DEVELOPER_ID" ]]; then
+  mkdir -p "$ROOT/updates"
+  cp "$SPARKLE_STAGE/appcast.xml" "$ROOT/updates/appcast.xml"
+  cp "$RELEASE_DIR/phonebridge-update.json" "$ROOT/updates/phonebridge-update.json"
+else
+  echo "Stable update feeds were left unchanged because this is an unnotarized local-only build."
+fi
 
 cat > "$RELEASE_DIR/SHA256SUMS.txt" <<EOF
 $(shasum -a 256 "$RELEASE_DIR/PhoneBridge-macOS.dmg" "$RELEASE_DIR/PhoneBridge-android.apk" "$RELEASE_DIR/appcast.xml" "$RELEASE_DIR/phonebridge-update.json")
